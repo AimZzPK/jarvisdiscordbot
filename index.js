@@ -29,23 +29,31 @@ const OWNER_NAME = "W.Idoe known as AimZz";
 // =========================
 // MEMORY
 // =========================
-const MEMORY_FILE = path.join(__dirname, 'memory.json');
+const { Redis } = require('@upstash/redis');
 
-function loadMemory() {
+const redis = new Redis({
+  url: process.env.UPSTASH_REDIS_REST_URL,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN,
+});
+
+let memory = {};
+
+async function loadMemory() {
   try {
-    if (!fs.existsSync(MEMORY_FILE)) return {};
-    return JSON.parse(fs.readFileSync(MEMORY_FILE, 'utf8'));
+    const data = await redis.get('jarvis-memory');
+    memory = data || {};
   } catch {
-    return {};
+    memory = {};
   }
 }
 
-function saveMemory(data) {
-  fs.writeFileSync(MEMORY_FILE, JSON.stringify(data, null, 2));
+async function saveMemory(data) {
+  try {
+    await redis.set('jarvis-memory', data);
+  } catch (err) {
+    console.error('Redis save failed:', err);
+  }
 }
-
-let memory = loadMemory();
-
 // =========================
 // CLIENT
 // =========================
@@ -291,6 +299,7 @@ async function deployCommands() {
 // READY
 // =========================
 client.once('clientReady', async () => {
+  await loadMemory();
   console.log(`ONLINE 🔥 als ${client.user.tag}`);
   await deployCommands();
 });
