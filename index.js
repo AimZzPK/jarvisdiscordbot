@@ -38,11 +38,12 @@ const redis = new Redis({
 
 let memory = {};
 
-async function saveMemory(data) {
+async function loadMemory() {
   try {
-    await redis.set('jarvis-memory', JSON.stringify(data));
-  } catch (err) {
-    console.error('Redis save failed:', err);
+    const data = await redis.get('jarvis-memory');
+    memory = data || {};
+  } catch {
+    memory = {};
   }
 }
 
