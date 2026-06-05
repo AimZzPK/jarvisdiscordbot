@@ -50,10 +50,12 @@ async function loadMemory() {
 async function saveMemory(data) {
   try {
     await redis.set('jarvis-memory', JSON.stringify(data));
+    console.log('✅ Memory saved to Redis');
   } catch (err) {
     console.error('Redis save failed:', err);
   }
 }
+
 // =========================
 // CLIENT
 // =========================
