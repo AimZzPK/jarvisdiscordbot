@@ -273,6 +273,41 @@ const commands = [
     o.setName('url').setDescription('Website URL').setRequired(true)
   ).setDMPermission(true),
 
+  new SlashCommandBuilder()
+  .setName('trivia')
+  .setDescription('Answer an AI trivia question')
+  .setDMPermission(true),
+
+new SlashCommandBuilder()
+  .setName('wouldyourather')
+  .setDescription('Would you rather...')
+  .setDMPermission(true),
+
+new SlashCommandBuilder()
+  .setName('warn')
+  .setDescription('Warn a user')
+  .addUserOption(o => o.setName('user').setDescription('User to warn').setRequired(true))
+  .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(true))
+  .setDMPermission(true),
+
+new SlashCommandBuilder()
+  .setName('warnings')
+  .setDescription('Check warnings for a user')
+  .addUserOption(o => o.setName('user').setDescription('User to check').setRequired(true))
+  .setDMPermission(true),
+
+new SlashCommandBuilder()
+  .setName('news')
+  .setDescription('Get latest news on a topic')
+  .addStringOption(o => o.setName('topic').setDescription('Topic to search').setRequired(true))
+  .setDMPermission(true),
+
+new SlashCommandBuilder()
+  .setName('define')
+  .setDescription('Define a word')
+  .addStringOption(o => o.setName('word').setDescription('Word to define').setRequired(true))
+  .setDMPermission(true),
+
 
 ].map(c => c.toJSON());
 
@@ -750,6 +785,136 @@ Never write @everyone or @here in your reply.`
     return interaction.editReply('❌ Could not access that website. It might be blocked or down.');
   }
 }
+
+if (interaction.commandName === 'trivia') {
+  await interaction.deferReply();
+  try {
+    const res = await groq.chat.completions.create({
+      model: 'meta-llama/llama-3.1-8b-instruct',
+      messages: [
+        {
+          role: 'system',
+          content: 'Generate a fun trivia question with 4 multiple choice options (A, B, C, D) and the correct answer. Format it exactly like this:\nQUESTION: ...\nA) ...\nB) ...\nC) ...\nD) ...\nANSWER: A'
+        },
+        { role: 'user', content: 'Give me a random trivia question.' }
+      ],
+      temperature: 1.0,
+      max_tokens: 200
+    });
+
+    const text = res.choices[0].message.content;
+    const answerMatch = text.match(/ANSWER:\s*([ABCD])/);
+    const answer = answerMatch ? answerMatch[1] : '?';
+    const question = text.replace(/ANSWER:.*/s, '').trim();
+
+    const key = `trivia-${interaction.channel.id}`;
+    memory[key] = answer;
+    saveMemory(memory);
+
+    return interaction.editReply(`🧠 **TRIVIA TIME!**\n\n${question}\n\n*Reply with A, B, C, or D!*`);
+  } catch (err) {
+    console.error(err);
+    return interaction.editReply('❌ trivia broke rq');
+  }
+}
+
+if (interaction.commandName === 'wouldyourather') {
+  await interaction.deferReply();
+  try {
+    const res = await groq.chat.completions.create({
+      model: 'meta-llama/llama-3.1-8b-instruct',
+      messages: [
+        {
+          role: 'system',
+          content: 'Generate a fun and creative "would you rather" question with two wild options. Format exactly like:\nWould you rather...\n🅰️ Option 1\n🅱️ Option 2'
+        },
+        { role: 'user', content: 'Give me a would you rather question.' }
+      ],
+      temperature: 1.0,
+      max_tokens: 100
+    });
+
+    return interaction.editReply(res.choices[0].message.content);
+  } catch (err) {
+    console.error(err);
+    return interaction.editReply('❌ failed rq');
+  }
+}
+
+if (interaction.commandName === 'warn') {
+  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+  if (!interaction.member.permissions.has('ModerateMembers')) {
+    return interaction.reply({ content: '❌ no permission', flags: 64 });
+  }
+  const target = interaction.options.getUser('user');
+  const reason = interaction.options.getString('reason');
+  const key = `warns-${interaction.guild.id}-${target.id}`;
+  memory[key] = memory[key] || [];
+  memory[key].push({ reason, by: interaction.user.username, time: Date.now() });
+  saveMemory(memory);
+
+  try {
+    await target.send(`⚠️ You were warned in **${interaction.guild.name}**\nReason: ${reason}`);
+  } catch {}
+
+  return interaction.reply(`⚠️ **${target.username}** has been warned. Total warnings: **${memory[key].length}**`);
+}
+
+if (interaction.commandName === 'warnings') {
+  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+  const target = interaction.options.getUser('user');
+  const key = `warns-${interaction.guild.id}-${target.id}`;
+  const warns = memory[key] || [];
+
+  if (warns.length === 0) return interaction.reply(`✅ **${target.username}** has no warnings.`);
+
+  const list = warns.map((w, i) => `${i + 1}. ${w.reason} — by ${w.by}`).join('\n');
+  return interaction.reply(`⚠️ **${target.username}** has **${warns.length}** warning(s):\n${list}`);
+}
+
+if (interaction.commandName === 'news') {
+  await interaction.deferReply();
+  const topic = interaction.options.getString('topic');
+  try {
+    const res = await axios.get('https://newsapi.org/v2/everything', {
+      params: {
+        q: topic,
+        pageSize: 5,
+        sortBy: 'publishedAt',
+        language: 'en',
+        apiKey: process.env.NEWS_API_KEY
+      }
+    });
+
+    const articles = res.data.articles;
+    if (!articles || articles.length === 0) return interaction.editReply('❌ No news found.');
+
+    const formatted = articles.map(a => `**${a.title}**\n🔗 ${a.url}`).join('\n\n');
+    return interaction.editReply(`📰 **News: ${topic}**\n\n${formatted}`);
+  } catch (err) {
+    console.error(err);
+    return interaction.editReply('❌ Could not fetch news. Make sure NEWS_API_KEY is set.');
+  }
+}
+
+if (interaction.commandName === 'define') {
+  await interaction.deferReply();
+  const word = interaction.options.getString('word');
+  try {
+    const res = await axios.get(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`);
+    const entry = res.data[0];
+    const meaning = entry.meanings[0];
+    const def = meaning.definitions[0];
+
+    let reply = `📖 **${entry.word}** *(${meaning.partOfSpeech})*\n${def.definition}`;
+    if (def.example) reply += `\n*"${def.example}"*`;
+
+    return interaction.editReply(reply);
+  } catch (err) {
+    return interaction.editReply(`❌ No definition found for **${word}**.`);
+  }
+}
+
 });
 
 
