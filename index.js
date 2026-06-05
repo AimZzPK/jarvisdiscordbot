@@ -332,27 +332,17 @@ client.on('interactionCreate', async (interaction) => {
   const rawPrompt = interaction.options.getString('prompt');
   const prompt = enhancePrompt(rawPrompt);
 
-  try {
-    const res = await axios.post(
-      "https://api.openai.com/v1/images/generations",
-      { model: "gpt-image-1", prompt, size: "1024x1024", n: 1 },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-          "Content-Type": "application/json"
-        }
-      }
-    );
-    const imageUrl = res.data.data[0].url;
-    return interaction.editReply({ content: `🖼️ ${imageUrl}` });
-  } catch {
-    const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(rawPrompt)}?width=1024&height=1024&nologo=true&model=flux`;
-    return interaction.editReply({ content: `🖼️ ${imageUrl}` });
+    try {
+    const img = await axios.get(imageUrl, { responseType: "arraybuffer" });
+    const fileName = `img_${Date.now()}.png`;
+    const filePath = path.join(__dirname, fileName);
+    fs.writeFileSync(filePath, img.data);
+    return interaction.editReply({ files: [filePath] });
+  } catch (err) {
+    console.error(err);
+    return interaction.editReply("❌ image failed");
   }
-}
-
-// Just send the URL — Discord auto-embeds it, no download needed
-return interaction.editReply({ content: `🖼️ ${imageUrl}` });
+  }
 
   if (interaction.commandName === 'clearmemory') {
     if (!isOwner(interaction.user.id)) {
