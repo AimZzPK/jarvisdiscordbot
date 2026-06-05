@@ -41,7 +41,7 @@ let memory = {};
 async function loadMemory() {
   try {
     const data = await redis.get('jarvis-memory');
-    memory = data || {};
+    memory = data ? JSON.parse(data) : {};
   } catch {
     memory = {};
   }
@@ -49,11 +49,13 @@ async function loadMemory() {
 
 async function saveMemory(data) {
   try {
-    await redis.set('jarvis-memory', data);
+    await redis.set('jarvis-memory', JSON.stringify(data));
   } catch (err) {
     console.error('Redis save failed:', err);
   }
 }
+console.log("Upstash URL:", process.env.UPSTASH_REDIS_REST_URL ? "✅" : "❌ MISSING");
+   console.log("Upstash Token:", process.env.UPSTASH_REDIS_REST_TOKEN ? "✅" : "❌ MISSING");
 // =========================
 // CLIENT
 // =========================
