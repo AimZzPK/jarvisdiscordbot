@@ -634,11 +634,37 @@ return interaction.editReply({ content: `🖼️ ${imageUrl}` });
   return interaction.reply(`🔨 banned ${user.tag}`);
 }
 
-  if (interaction.commandName === 'search') {
-    const q = interaction.options.getString('query');
-    return interaction.reply(`🔎 https://www.google.com/search?q=${encodeURIComponent(q)}`);
-  }
+ if (interaction.commandName === 'search') {
+  await interaction.deferReply();
+  const q = interaction.options.getString('query');
 
+  try {
+    const res = await axios.get(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
+
+    const cheerio = require('cheerio');
+    const $ = cheerio.load(res.data);
+    const results = [];
+
+    $('.result__body').slice(0, 5).each((i, el) => {
+      const title = $(el).find('.result__title').text().trim();
+      const snippet = $(el).find('.result__snippet').text().trim();
+      const link = $(el).find('.result__url').text().trim();
+      if (title) results.push(`**${title}**\n${snippet}\n🔗 ${link}`);
+    });
+
+    if (results.length === 0) return interaction.editReply('❌ No results found.');
+
+    return interaction.editReply(`🔍 **Results for "${q}":**\n\n${results.join('\n\n')}`);
+
+  } catch (err) {
+    console.error(err);
+    return interaction.editReply('❌ Search failed, try again.');
+  }
+}
   if (interaction.commandName === 'ask') {
     await interaction.deferReply();
     const question = interaction.options.getString('question');
