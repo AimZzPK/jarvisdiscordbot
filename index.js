@@ -268,6 +268,12 @@ const commands = [
     ).setDMPermission(true),
 
     new SlashCommandBuilder()
+  .setName('roast')
+  .setDescription('Roast a user 🔥')
+  .addUserOption(o => o.setName('user').setDescription('User to roast').setRequired(true))
+  .setDMPermission(true),
+
+    new SlashCommandBuilder()
   .setName('browse')
   .setDescription('Fetch and summarize any website')
   .addStringOption(o =>
@@ -678,6 +684,39 @@ Never write @everyone or @here in your reply.`
     } catch (err) {
       console.error(err);
       return interaction.editReply("brain broke rq, try again 💀");
+    }
+  }
+    if (interaction.commandName === 'roast') {
+    await interaction.deferReply();
+    const target = interaction.options.getUser('user');
+    const isSelf = target.id === interaction.user.id;
+
+    const subject = isSelf ? 'themselves' : target.username;
+    const requester = interaction.user.username;
+
+    try {
+      const res = await groq.chat.completions.create({
+        model: 'meta-llama/llama-3.1-8b-instruct',
+        messages: [
+          {
+            role: 'system',
+            content: `You are a comedy roast master. Write a short, funny, witty roast. Keep it light — think comedy roast not bullying. 2-3 sentences max. No emojis.`
+          },
+          {
+            role: 'user',
+            content: `Roast a Discord user named "${subject}". The roast was requested by "${requester}".`
+          }
+        ],
+        temperature: 1.0,
+        max_tokens: 150
+      });
+
+      const roast = res.choices[0].message.content;
+      return interaction.editReply(`🔥 **${target.username}**, ${roast}`);
+
+    } catch (err) {
+      console.error(err);
+      return interaction.editReply('❌ roast machine broke rq');
     }
   }
 
