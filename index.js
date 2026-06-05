@@ -328,41 +328,27 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (interaction.commandName === 'generate') {
-    await interaction.deferReply();
-    const rawPrompt = interaction.options.getString('prompt');
-    const prompt = enhancePrompt(rawPrompt);
-    let imageUrl = null;
+  await interaction.deferReply();
+  const rawPrompt = interaction.options.getString('prompt');
+  const prompt = enhancePrompt(rawPrompt);
 
-    try {
-      const res = await axios.post(
-        "https://api.openai.com/v1/images/generations",
-        { model: "gpt-image-1", prompt, size: "1024x1024", n: 1 },
-        {
-          headers: {
-            Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-            "Content-Type": "application/json"
-          }
+  try {
+    const res = await axios.post(
+      "https://api.openai.com/v1/images/generations",
+      { model: "gpt-image-1", prompt, size: "1024x1024", n: 1 },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json"
         }
-      );
-      imageUrl = res.data.data[0].url;
-    } catch {
-      imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(rawPrompt)}?width=1024&height=1024&nologo=true`;
-    }
-
-    try {
-  const res = await axios.post(
-    "https://api.openai.com/v1/images/generations",
-    { model: "gpt-image-1", prompt, size: "1024x1024", n: 1 },
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
       }
-    }
-  );
-  imageUrl = res.data.data[0].url;
-} catch {
-  imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(rawPrompt)}?width=1024&height=1024&nologo=true&model=flux`;
+    );
+    const imageUrl = res.data.data[0].url;
+    return interaction.editReply({ content: `🖼️ ${imageUrl}` });
+  } catch {
+    const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(rawPrompt)}?width=1024&height=1024&nologo=true&model=flux`;
+    return interaction.editReply({ content: `🖼️ ${imageUrl}` });
+  }
 }
 
 // Just send the URL — Discord auto-embeds it, no download needed
