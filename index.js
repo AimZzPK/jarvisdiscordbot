@@ -332,17 +332,27 @@ client.on('interactionCreate', async (interaction) => {
   const rawPrompt = interaction.options.getString('prompt');
   const prompt = enhancePrompt(rawPrompt);
 
-    try {
-    const img = await axios.get(imageUrl, { responseType: "arraybuffer" });
-    const fileName = `img_${Date.now()}.png`;
-    const filePath = path.join(__dirname, fileName);
-    fs.writeFileSync(filePath, img.data);
-    return interaction.editReply({ files: [filePath] });
-  } catch (err) {
-    console.error(err);
-    return interaction.editReply("❌ image failed");
+  try {
+    const res = await axios.post(
+      "https://api.openai.com/v1/images/generations",
+      { model: "gpt-image-1", prompt, size: "1024x1024", n: 1 },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+    const imageUrl = res.data.data[0].url;
+    return interaction.editReply({ content: `🖼️ ${imageUrl}` });
+  } catch {
+    const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(rawPrompt)}?width=1024&height=1024&nologo=true&model=flux`;
+    return interaction.editReply({ content: `🖼️ ${imageUrl}` });
   }
-  }
+}
+
+// Just send the URL — Discord auto-embeds it, no download needed
+return interaction.editReply({ content: `🖼️ ${imageUrl}` });
 
   if (interaction.commandName === 'clearmemory') {
     if (!isOwner(interaction.user.id)) {
@@ -624,39 +634,11 @@ client.on('interactionCreate', async (interaction) => {
   return interaction.reply(`🔨 banned ${user.tag}`);
 }
 
- if (interaction.commandName === 'search') {
-  await interaction.deferReply();
-  const q = interaction.options.getString('query');
-
-  try {
-    const res = await axios.get(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html',
-        'Accept-Language': 'en-US,en;q=0.9'
-      },
-      timeout: 10000
-    });
-
-    const cheerio = require('cheerio');
-    const $ = cheerio.load(res.data);
-    const results = [];
-
-    $('a.result__a').slice(0, 5).each((i, el) => {
-      const title = $(el).text().trim();
-      const link = $(el).attr('href');
-      if (title && link) results.push(`**${title}**\n🔗 ${link}`);
-    });
-
-    if (results.length === 0) return interaction.editReply(`❌ No results found. Try: https://google.com/search?q=${encodeURIComponent(q)}`);
-
-    return interaction.editReply(`🔍 **"${q}"**\n\n${results.join('\n\n')}`);
-
-  } catch (err) {
-    console.error(err);
-    return interaction.editReply('❌ Search failed, try again.');
+  if (interaction.commandName === 'search') {
+    const q = interaction.options.getString('query');
+    return interaction.reply(`🔎 https://www.google.com/search?q=${encodeURIComponent(q)}`);
   }
-}
+
   if (interaction.commandName === 'ask') {
     await interaction.deferReply();
     const question = interaction.options.getString('question');
