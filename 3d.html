@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<script src="https://cdn.tailwindcss.com"></script>
+
+<style>
+.hero{
+  position:relative;
+  height:300vh;
+  perspective:1200px; /* 🔥 dit maakt 3D legit */
+}
+
+.hero-content{
+  position:sticky;
+  top:0;
+  height:100vh;
+  display:flex;
+  flex-direction:column;
+  justify-content:center;
+  align-items:center;
+  text-align:center;
+  transform-style:preserve-3d;
+}
+
+/* extra layers */
+.bg-layer{
+  position:fixed;
+  inset:0;
+  z-index:-2;
+}
+
+.overlay-layer{
+  position:fixed;
+  inset:0;
+  background:radial-gradient(circle at center, transparent, black 70%);
+  z-index:-1;
+  opacity:0.6;
+}
+
+/* title deeper 3D */
+.title{
+  font-size:6rem;
+  font-weight:900;
+  transform:translateZ(0);
+  transition:transform 0.1s linear, opacity 0.1s linear;
+}
+
+.subtitle{
+  color:#94a3b8;
+  transform:translateZ(50px);
+  transition:all 0.2s;
+}
+.video-bg{
+  position:fixed;
+  top:50%;
+  left:50%;
+  width:auto;
+  height:100%;
+  min-width:100%;
+  min-height:100%;
+  transform:translate(-50%, -50%);
+  object-fit:cover;
+  z-index:-2;
+  filter:brightness(0.5);
+}
+</style>
+</head>
+
+<body>
+
+<section class="hero">
+
+  <!-- VIDEO -->
+  <video class="video-bg bg-layer" autoplay muted loop playsinline>
+    <source src="website/ironman.mp4" type="video/mp4">
+  </video>
+
+  <!-- DARK OVERLAY -->
+  <div class="overlay-layer"></div>
+
+  <!-- CONTENT -->
+  <div class="hero-content">
+    <h1 class="title" id="title">JARVIS</h1>
+    <p class="subtitle" id="subtitle">AI Interface System</p>
+  </div>
+
+</section>
+
+<script>
+const title = document.getElementById("title");
+const subtitle = document.getElementById("subtitle");
+
+window.addEventListener("scroll", () => {
+  const scroll = window.scrollY;
+
+  const progress = scroll / window.innerHeight;
+
+  // 🔥 smooth scaling
+  const scale = 1 + progress * 0.8;
+
+  // 🔥 fade out
+  const opacity = 1 - progress * 1.2;
+
+  // 🔥 3D tilt
+  const rotateX = progress * 40;
+  const translateZ = progress * 300;
+
+  title.style.transform = `
+    scale(${scale})
+    rotateX(${rotateX}deg)
+    translateZ(${translateZ}px)
+  `;
+
+  subtitle.style.transform = `
+    translateZ(${translateZ / 2}px)
+    translateY(${scroll * 0.2}px)
+  `;
+
+  title.style.opacity = opacity;
+  subtitle.style.opacity = opacity;
+});
+</script>
+
+</body>
+</html>
