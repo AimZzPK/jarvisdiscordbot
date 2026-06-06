@@ -362,20 +362,41 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (interaction.commandName === 'clearmemory') {
-    if (!isOwner(interaction.user.id)) {
-      return interaction.reply({ content: "no permission", flags: 64 });
+  if (!isOwner(interaction.user.id)) {
+    return interaction.reply({ content: "no permission", flags: 64 });
+  }
+
+  const target = interaction.options.getString('target');
+
+  if (target === "all") {
+    // Wipe everything except persistent config
+    const keep = {
+      ownerConfirmed: memory.ownerConfirmed,
+      modes: memory.modes,
+      ratings: memory.ratings,
+      feedback: memory.feedback,
+    };
+    memory = keep;
+    await saveMemory(memory);
+    return interaction.reply({ content: "💀 all conversation memory cleared" });
+
+  } else {
+    // Delete every key that contains the user ID
+    let deleted = 0;
+    for (const key of Object.keys(memory)) {
+      if (key.includes(target)) {
+        delete memory[key];
+        deleted++;
+      }
     }
-    const target = interaction.options.getString('target');
-    if (target === "all") {
-      memory = {};
-    } else {
-      delete memory[target];
-    }
-    saveMemory(memory);
+    await saveMemory(memory);
     return interaction.reply({
-      content: target === "all" ? "💀 all memory cleared" : `🧠 cleared ${target}`
+      content: deleted > 0
+        ? `🧠 cleared ${deleted} memory key(s) for \`${target}\``
+        : `❌ no memory found for \`${target}\``
     });
   }
+}
 
   if (interaction.commandName === 'invite') {
     return interaction.reply({ content: `🚀 Invite me here:\n👉 https://jarvisbot-rust.vercel.app/` });
