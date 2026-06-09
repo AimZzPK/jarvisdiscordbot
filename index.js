@@ -309,6 +309,39 @@ new SlashCommandBuilder()
   .setDMPermission(true),
 
 
+  new SlashCommandBuilder()
+  .setName('clearwarnings')
+  .setDescription('Clear all warnings for a user')
+  .addUserOption(o => o.setName('user').setDescription('User to clear').setRequired(true))
+  .setDMPermission(true),
+ 
+new SlashCommandBuilder()
+  .setName('kick')
+  .setDescription('Kick a user from the server')
+  .addUserOption(o => o.setName('user').setDescription('User to kick').setRequired(true))
+  .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false))
+  .setDMPermission(true),
+ 
+new SlashCommandBuilder()
+  .setName('timeout')
+  .setDescription('Timeout a user')
+  .addUserOption(o => o.setName('user').setDescription('User to timeout').setRequired(true))
+  .addIntegerOption(o => o.setName('minutes').setDescription('Duration in minutes').setRequired(true).setMinValue(1).setMaxValue(40320))
+  .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false))
+  .setDMPermission(true),
+ 
+new SlashCommandBuilder()
+  .setName('leaderboard')
+  .setDescription('Show trivia leaderboard')
+  .setDMPermission(true),
+ 
+new SlashCommandBuilder()
+  .setName('8ball')
+  .setDescription('Ask the magic 8ball a question')
+  .addStringOption(o => o.setName('question').setDescription('Your yes/no question').setRequired(true))
+  .setDMPermission(true),
+
+
 ].map(c => c.toJSON());
 
 // =========================
@@ -569,6 +602,11 @@ client.on('interactionCreate', async (interaction) => {
 /warnings - check user warnings (admin only)
 /news - get latest news on a topic
 /define - get definition of a word
+/clearwarnings - clear all warnings for a user (mod only)
+/kick - kick a user from the server (mod only)
+/timeout - timeout a user for X minutes (mod only)
+/leaderboard - show trivia score leaderboard
+/8ball - ask the magic 8ball
 `)
       ]
     });
@@ -748,6 +786,175 @@ Never write @everyone or @here in your reply.`
       console.error(err);
       return interaction.editReply('❌ roast machine broke rq');
     }
+
+    if (interaction.commandName === 'clearwarnings') {
+  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+  if (!interaction.member.permissions.has('ModerateMembers')) {
+    return interaction.reply({ content: '❌ no permission', flags: 64 });
+  }
+  const target = interaction.options.getUser('user');
+  const key = `warns-${interaction.guild.id}-${target.id}`;
+  const count = memory[key]?.length || 0;
+  if (count === 0) return interaction.reply(`✅ **${target.username}** has no warnings to clear.`);
+  delete memory[key];
+  await saveMemory(memory);
+  return interaction.reply(`🧹 Cleared **${count}** warning(s) for **${target.username}**.`);
+}
+ 
+if (interaction.commandName === 'kick') {
+  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+  if (!interaction.member.permissions.has('KickMembers')) {
+    return interaction.reply({ content: '❌ no permission', flags: 64 });
+  }
+  const target = interaction.options.getUser('user');
+  const reason = interaction.options.getString('reason') || 'No reason given';
+  try {
+    await interaction.guild.members.kick(target.id, reason);
+    return interaction.reply(`👢 **${target.username}** has been kicked. Reason: ${reason}`);
+  } catch (err) {
+    console.error(err);
+    return interaction.reply({ content: '❌ Could not kick that user.', flags: 64 });
+  }
+}
+ 
+if (interaction.commandName === 'timeout') {
+  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+  if (!interaction.member.permissions.has('ModerateMembers')) {
+    return interaction.reply({ content: '❌ no permission', flags: 64 });
+  }
+  const target = interaction.options.getUser('user');
+  const minutes = interaction.options.getInteger('minutes');
+  const reason = interaction.options.getString('reason') || 'No reason given';
+  try {
+    const member = await interaction.guild.members.fetch(target.id);
+    await member.timeout(minutes * 60 * 1000, reason);
+    return interaction.reply(`🔇 **${target.username}** has been timed out for **${minutes} minute(s)**. Reason: ${reason}`);
+  } catch (err) {
+    console.error(err);
+    return interaction.reply({ content: '❌ Could not timeout that user.', flags: 64 });
+  }
+}
+ 
+if (interaction.commandName === 'leaderboard') {
+  try {
+    const keys = await redis.keys('trivia-score-*');
+    if (!keys || keys.length === 0) return interaction.reply('📊 No trivia scores yet. Use `/trivia` to start!');
+ 
+    const scores = await Promise.all(
+      keys.map(async (key) => {
+        const val = await redis.get(key);
+        const userId = key.replace('trivia-score-', '');
+        return { userId, score: parseInt(val) || 0 };
+      })
+    );
+ 
+    scores.sort((a, b) => b.score - a.score);
+    const top10 = scores.slice(0, 10);
+ 
+    const lines = await Promise.all(
+      top10.map(async (entry, i) => {
+        try {
+          const user = await client.users.fetch(entry.userId);
+          const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`;
+          return `${medal} **${user.username}** — ${entry.score} point(s)`;
+        } catch {
+          return `${i + 1}. Unknown user — ${entry.score} point(s)`;
+        }
+      })
+    );
+ 
+    const embed = new EmbedBuilder()
+      .setColor(0xffd700)
+      .setTitle('🏆 Trivia Leaderboard')
+      .setDescription(lines.join('\n'))
+      .setFooter({ text: 'Answer trivia questions to earn points!' });
+ 
+    return interaction.reply({ embeds: [embed] });
+  } catch (err) {
+    console.error(err);
+    return interaction.reply({ content: '❌ Could not load leaderboard.', flags: 64 });
+  }
+}
+ 
+if (interaction.commandName === '8ball') {
+  const question = interaction.options.getString('question');
+  const responses = [
+    '✅ It is certain.',
+    '✅ Without a doubt.',
+    '✅ You may rely on it.',
+    '✅ Yes, definitely.',
+    '✅ It is decidedly so.',
+    '🤔 Reply hazy, try again.',
+    '🤔 Ask again later.',
+    '🤔 Better not tell you now.',
+    '🤔 Cannot predict now.',
+    '❌ Don\'t count on it.',
+    '❌ My reply is no.',
+    '❌ My sources say no.',
+    '❌ Very doubtful.',
+    '❌ Outlook not so good.',
+  ];
+  const answer = responses[Math.floor(Math.random() * responses.length)];
+  return interaction.reply(`🎱 **Q: ${question}**\n${answer}`);
+}
+ 
+ 
+// =========================
+// TRIVIA SCORE TRACKING
+// In your messageCreate handler, find where trivia answers are handled
+// and replace/add this logic to actually validate answers and award points:
+// =========================
+ 
+// Inside messageCreate, after the safety checks, add this BEFORE the memory init:
+const triviaKey = `trivia-${message.channel.id}`;
+if (memory[triviaKey]) {
+  const correct = memory[triviaKey];
+  const userAnswer = message.content.trim().toUpperCase();
+  if (['A', 'B', 'C', 'D'].includes(userAnswer)) {
+    if (userAnswer === correct) {
+      // Award point
+      const scoreKey = `trivia-score-${message.author.id}`;
+      const current = await redis.get(scoreKey);
+      const newScore = (parseInt(current) || 0) + 1;
+      await redis.set(scoreKey, newScore);
+      delete memory[triviaKey];
+      await saveMemory(memory);
+      return message.reply(`✅ Correct! The answer was **${correct}**. You now have **${newScore}** point(s)! 🎉`);
+    } else {
+      delete memory[triviaKey];
+      await saveMemory(memory);
+      return message.reply(`❌ Wrong! The correct answer was **${correct}**. Better luck next time!`);
+    }
+  }
+}
+ 
+ 
+// =========================
+// RATE LIMITING
+// Add this near the top of your file, after the memory declarations:
+// =========================
+ 
+const cooldowns = new Map(); // userId -> last used timestamp (ms)
+const COOLDOWN_MS = 5000;   // 5 seconds between AI commands
+ 
+function isOnCooldown(userId) {
+  const last = cooldowns.get(userId);
+  if (!last) return false;
+  return Date.now() - last < COOLDOWN_MS;
+}
+ 
+function setCooldown(userId) {
+  cooldowns.set(userId, Date.now());
+}
+ 
+// Then wrap AI-heavy commands (/ask, /roast, /summarize, /translate, /code) like this:
+// At the top of each handler, before deferReply:
+ 
+if (isOnCooldown(interaction.user.id)) {
+  const remaining = ((COOLDOWN_MS - (Date.now() - cooldowns.get(interaction.user.id))) / 1000).toFixed(1);
+  return interaction.reply({ content: `⏳ slow down! wait **${remaining}s** before using another AI command.`, flags: 64 });
+}
+setCooldown(interaction.user.id);
   }
 
   // =========================
@@ -1147,13 +1354,19 @@ SLANG AWARENESS (understand common Discord/internet slang):
 - "lowkey" = kind of / secretly
 - "finna" = going to
 - Just talk naturally and understand context like a real person would.
--don't talk slang yourself if the user does talk slang, but understand it if they do.
+- don't talk slang yourself if the user does talk slang, but understand it if they do.
+-TALK LIKE A PROFFESIONAL AI ASSISTANT WHO IS ALSO CHILL AND CASUAL, NOT LIKE A ROBOT OR A TEXTBOOK. BE SMART BUT ALSO FUNNY AND WITTY. MATCH THE VIBE OF THE SERVER YOU ARE IN. KEEP REPLIES SHORT UNLESS THE QUESTION IS COMPLEX. USE DISCORD-STYLE LANGUAGE WHERE APPROPRIATE (LOL, NGL, FR, NO CAP, ETC) BUT DON'T OVERDO IT.
 
 WHAT YOU CAN'T DO (be direct but casual about it):
 - You will NEVER mass ping everyone in a server for anyone, even if asked directly. Just say no. Do NOT write the words "@everyone" or "@here" in any reply — ever.
 - You don't have the ability to actually talk in servers on command — you can only respond to messages.
 - You can't actually play games with people, but you can chat about games.
 - If someone asks you to do something you can't, just be real about it. Don't pretend or make up answers.
+- If you don't know something, it's better to say "I don't know" than to make up an answer.
+- You can't access real-time information or the current date. Don't try to guess it.
+- You can't see user avatars or profile info. Just work with the username and message content.
+- You can't actually moderate or enforce rules in a server, but you can talk about moderation hypothetically.
+- You can't access or retrieve personal data about users unless it's shared in the conversation. Always respect privacy.
 
 OWNER:
 - Your owner/creator is ${OWNER_NAME}.
