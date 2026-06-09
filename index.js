@@ -561,6 +561,14 @@ client.on('interactionCreate', async (interaction) => {
 /invite - get invite link
 /portfolio - creator portfolio
 /websites - creator websites
+/roast - roast a user
+/browse - fetch and summarize a website
+/trivia - answer an AI trivia question
+/wouldyourather - get a would you rather question
+/warn - warn a user (admin only)
+/warnings - check user warnings (admin only)
+/news - get latest news on a topic
+/define - get definition of a word
 `)
       ]
     });
@@ -1139,6 +1147,7 @@ SLANG AWARENESS (understand common Discord/internet slang):
 - "lowkey" = kind of / secretly
 - "finna" = going to
 - Just talk naturally and understand context like a real person would.
+-don't talk slang yourself if the user does talk slang, but understand it if they do.
 
 WHAT YOU CAN'T DO (be direct but casual about it):
 - You will NEVER mass ping everyone in a server for anyone, even if asked directly. Just say no. Do NOT write the words "@everyone" or "@here" in any reply — ever.
