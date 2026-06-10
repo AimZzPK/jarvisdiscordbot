@@ -5,7 +5,7 @@ console.log("GROQ KEY:", process.env.GROQ_API_KEY);
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
-const { EmbedBuilder } = require('discord.js');
+const { EmbedBuilder, AuditLogEvent } = require('discord.js');
 
 const {
   Client,
@@ -17,26 +17,22 @@ const {
 } = require('discord.js');
 
 const OpenAI = require('openai');
+
 // =========================
 // RATE LIMITING
-// Add this near the top of your file, after the memory declarations:
 // =========================
- 
-const cooldowns = new Map(); // userId -> last used timestamp (ms)
-const COOLDOWN_MS = 5000;   // 5 seconds between AI commands
- 
+const cooldowns = new Map();
+const COOLDOWN_MS = 5000;
+
 function isOnCooldown(userId) {
   const last = cooldowns.get(userId);
   if (!last) return false;
   return Date.now() - last < COOLDOWN_MS;
 }
- 
+
 function setCooldown(userId) {
   cooldowns.set(userId, Date.now());
 }
-
-
-
 
 // =========================
 // CONFIG
@@ -45,7 +41,7 @@ const OWNER_ID = "1314595863666098176";
 const OWNER_NAME = "W.Idoe known as AimZz";
 
 // =========================
-// MEMORY
+// MEMORY (Redis)
 // =========================
 const { Redis } = require('@upstash/redis');
 
@@ -82,9 +78,12 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.DirectMessages
+    GatewayIntentBits.DirectMessages,
+    GatewayIntentBits.GuildMembers,        // for join/leave logging
+    GatewayIntentBits.GuildModeration,     // for ban/unban logging
+    GatewayIntentBits.GuildVoiceStates,    // optional: voice join/leave
   ],
-  partials: [Partials.Channel,  Partials.Message]
+  partials: [Partials.Channel, Partials.Message, Partials.GuildMember]
 });
 
 // =========================
@@ -150,6 +149,445 @@ function getActiveMode(guildId) {
 }
 
 // =========================
+// LOGGING SYSTEM (Dyno-style)
+// =========================
+
+/**
+ * Get the log channel for a guild (if set).
+ * Returns a TextChannel or null.
+ */
+async function getLogChannel(guildId) {
+  const channelId = memory.logChannels?.[guildId];
+  if (!channelId) return null;
+  try {
+    const channel = await client.channels.fetch(channelId);
+    return channel;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Send a log embed to the guild's log channel.
+ */
+async function sendLog(guildId, embed) {
+  const channel = await getLogChannel(guildId);
+  if (!channel) return;
+  try {
+    await channel.send({ embeds: [embed] });
+  } catch (err) {
+    console.error(`[LOG] Failed to send log to guild ${guildId}:`, err.message);
+  }
+}
+
+/**
+ * Push an event into Redis-backed log history (last 200 per guild).
+ */
+async function pushLogEvent(guildId, event) {
+  try {
+    const key = `logs-${guildId}`;
+    const existing = await redis.get(key);
+    const logs = existing ? JSON.parse(existing) : [];
+    logs.push({ ...event, timestamp: Date.now() });
+    if (logs.length > 200) logs.splice(0, logs.length - 200);
+    await redis.set(key, JSON.stringify(logs));
+  } catch (err) {
+    console.error('[LOG] Redis log push failed:', err.message);
+  }
+}
+
+// Colour palette for log embed types
+const LOG_COLORS = {
+  join:          0x57f287, // green
+  leave:         0xed4245, // red
+  ban:           0xe74c3c, // dark red
+  unban:         0x2ecc71, // green
+  kick:          0xe67e22, // orange
+  timeout:       0xf1c40f, // yellow
+  messageDelete: 0xff6b6b, // salmon
+  messageEdit:   0x3498db, // blue
+  channelCreate: 0x1abc9c, // teal
+  channelDelete: 0xe74c3c, // red
+  roleCreate:    0x9b59b6, // purple
+  roleDelete:    0x8e44ad, // dark purple
+  roleUpdate:    0xa855f7, // violet
+  voiceJoin:     0x57f287, // green
+  voiceLeave:    0xed4245, // red
+  voiceMove:     0x3b82f6, // blue
+  warn:          0xfbbf24, // amber
+  nickChange:    0x60a5fa, // sky
+};
+
+// ─── Member Join ──────────────────────────────────────────────
+client.on('guildMemberAdd', async (member) => {
+  const event = {
+    type: 'join',
+    userId: member.id,
+    username: member.user.tag,
+    detail: `Account created: <t:${Math.floor(member.user.createdTimestamp / 1000)}:R>`
+  };
+  await pushLogEvent(member.guild.id, event);
+
+  const embed = new EmbedBuilder()
+    .setColor(LOG_COLORS.join)
+    .setTitle('📥 Member Joined')
+    .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
+    .addFields(
+      { name: 'User', value: `<@${member.id}> (${member.user.tag})`, inline: true },
+      { name: 'ID', value: member.id, inline: true },
+      { name: 'Account Age', value: `<t:${Math.floor(member.user.createdTimestamp / 1000)}:R>`, inline: true },
+      { name: 'Member Count', value: `${member.guild.memberCount}`, inline: true }
+    )
+    .setFooter({ text: `JARVIS Logs • ${member.guild.name}` })
+    .setTimestamp();
+
+  await sendLog(member.guild.id, embed);
+});
+
+// ─── Member Leave ─────────────────────────────────────────────
+client.on('guildMemberRemove', async (member) => {
+  const roles = member.roles.cache
+    .filter(r => r.id !== member.guild.id)
+    .map(r => `<@&${r.id}>`)
+    .join(', ') || 'None';
+
+  const event = {
+    type: 'leave',
+    userId: member.id,
+    username: member.user.tag,
+    detail: `Left or was removed`
+  };
+  await pushLogEvent(member.guild.id, event);
+
+  const embed = new EmbedBuilder()
+    .setColor(LOG_COLORS.leave)
+    .setTitle('📤 Member Left')
+    .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
+    .addFields(
+      { name: 'User', value: `${member.user.tag}`, inline: true },
+      { name: 'ID', value: member.id, inline: true },
+      { name: 'Roles', value: roles.length > 1024 ? roles.slice(0, 1021) + '...' : roles }
+    )
+    .setFooter({ text: `JARVIS Logs • ${member.guild.name}` })
+    .setTimestamp();
+
+  await sendLog(member.guild.id, embed);
+});
+
+// ─── Message Delete ───────────────────────────────────────────
+client.on('messageDelete', async (message) => {
+  if (!message.guild || message.author?.bot) return;
+
+  const event = {
+    type: 'messageDelete',
+    userId: message.author?.id,
+    username: message.author?.tag,
+    detail: message.content?.slice(0, 200) || '[no content]'
+  };
+  await pushLogEvent(message.guild.id, event);
+
+  const embed = new EmbedBuilder()
+    .setColor(LOG_COLORS.messageDelete)
+    .setTitle('🗑️ Message Deleted')
+    .addFields(
+      { name: 'Author', value: message.author ? `<@${message.author.id}> (${message.author.tag})` : 'Unknown', inline: true },
+      { name: 'Channel', value: `<#${message.channel.id}>`, inline: true },
+      { name: 'Content', value: message.content?.slice(0, 1024) || '*[empty or attachment]*' }
+    )
+    .setFooter({ text: `JARVIS Logs • ${message.guild.name}` })
+    .setTimestamp();
+
+  await sendLog(message.guild.id, embed);
+});
+
+// ─── Message Edit ─────────────────────────────────────────────
+client.on('messageUpdate', async (oldMsg, newMsg) => {
+  if (!newMsg.guild || newMsg.author?.bot) return;
+  if (oldMsg.content === newMsg.content) return; // embed unfurl, ignore
+
+  const event = {
+    type: 'messageEdit',
+    userId: newMsg.author?.id,
+    username: newMsg.author?.tag,
+    detail: `Before: ${oldMsg.content?.slice(0, 100)}`
+  };
+  await pushLogEvent(newMsg.guild.id, event);
+
+  const embed = new EmbedBuilder()
+    .setColor(LOG_COLORS.messageEdit)
+    .setTitle('✏️ Message Edited')
+    .setURL(newMsg.url)
+    .addFields(
+      { name: 'Author', value: `<@${newMsg.author.id}> (${newMsg.author.tag})`, inline: true },
+      { name: 'Channel', value: `<#${newMsg.channel.id}>`, inline: true },
+      { name: 'Before', value: oldMsg.content?.slice(0, 512) || '*[unavailable]*' },
+      { name: 'After',  value: newMsg.content?.slice(0, 512) || '*[empty]*' }
+    )
+    .setFooter({ text: `JARVIS Logs • ${newMsg.guild.name}` })
+    .setTimestamp();
+
+  await sendLog(newMsg.guild.id, embed);
+});
+
+// ─── Ban ──────────────────────────────────────────────────────
+client.on('guildBanAdd', async (ban) => {
+  let moderator = 'Unknown';
+  let reason = ban.reason || 'No reason given';
+  try {
+    await new Promise(r => setTimeout(r, 1000)); // wait for audit log
+    const audit = await ban.guild.fetchAuditLogs({ type: AuditLogEvent.MemberBan, limit: 1 });
+    const entry = audit.entries.first();
+    if (entry && entry.target.id === ban.user.id) {
+      moderator = entry.executor?.tag || 'Unknown';
+      reason = entry.reason || reason;
+    }
+  } catch {}
+
+  const event = {
+    type: 'ban',
+    userId: ban.user.id,
+    username: ban.user.tag,
+    detail: `Banned by ${moderator} — ${reason}`
+  };
+  await pushLogEvent(ban.guild.id, event);
+
+  const embed = new EmbedBuilder()
+    .setColor(LOG_COLORS.ban)
+    .setTitle('🔨 Member Banned')
+    .setThumbnail(ban.user.displayAvatarURL({ dynamic: true }))
+    .addFields(
+      { name: 'User', value: `${ban.user.tag}`, inline: true },
+      { name: 'ID', value: ban.user.id, inline: true },
+      { name: 'Moderator', value: moderator, inline: true },
+      { name: 'Reason', value: reason }
+    )
+    .setFooter({ text: `JARVIS Logs • ${ban.guild.name}` })
+    .setTimestamp();
+
+  await sendLog(ban.guild.id, embed);
+});
+
+// ─── Unban ────────────────────────────────────────────────────
+client.on('guildBanRemove', async (ban) => {
+  let moderator = 'Unknown';
+  try {
+    await new Promise(r => setTimeout(r, 1000));
+    const audit = await ban.guild.fetchAuditLogs({ type: AuditLogEvent.MemberUnban, limit: 1 });
+    const entry = audit.entries.first();
+    if (entry && entry.target.id === ban.user.id) {
+      moderator = entry.executor?.tag || 'Unknown';
+    }
+  } catch {}
+
+  const event = {
+    type: 'unban',
+    userId: ban.user.id,
+    username: ban.user.tag,
+    detail: `Unbanned by ${moderator}`
+  };
+  await pushLogEvent(ban.guild.id, event);
+
+  const embed = new EmbedBuilder()
+    .setColor(LOG_COLORS.unban)
+    .setTitle('✅ Member Unbanned')
+    .addFields(
+      { name: 'User', value: `${ban.user.tag}`, inline: true },
+      { name: 'ID', value: ban.user.id, inline: true },
+      { name: 'Moderator', value: moderator, inline: true }
+    )
+    .setFooter({ text: `JARVIS Logs • ${ban.guild.name}` })
+    .setTimestamp();
+
+  await sendLog(ban.guild.id, embed);
+});
+
+// ─── Channel Create ───────────────────────────────────────────
+client.on('channelCreate', async (channel) => {
+  if (!channel.guild) return;
+
+  let creator = 'Unknown';
+  try {
+    await new Promise(r => setTimeout(r, 1000));
+    const audit = await channel.guild.fetchAuditLogs({ type: AuditLogEvent.ChannelCreate, limit: 1 });
+    const entry = audit.entries.first();
+    if (entry) creator = entry.executor?.tag || 'Unknown';
+  } catch {}
+
+  const event = {
+    type: 'channelCreate',
+    detail: `#${channel.name} created by ${creator}`
+  };
+  await pushLogEvent(channel.guild.id, event);
+
+  const embed = new EmbedBuilder()
+    .setColor(LOG_COLORS.channelCreate)
+    .setTitle('📢 Channel Created')
+    .addFields(
+      { name: 'Channel', value: `<#${channel.id}> (${channel.name})`, inline: true },
+      { name: 'Type', value: channel.type.toString(), inline: true },
+      { name: 'Created by', value: creator, inline: true }
+    )
+    .setFooter({ text: `JARVIS Logs • ${channel.guild.name}` })
+    .setTimestamp();
+
+  await sendLog(channel.guild.id, embed);
+});
+
+// ─── Channel Delete ───────────────────────────────────────────
+client.on('channelDelete', async (channel) => {
+  if (!channel.guild) return;
+
+  let deleter = 'Unknown';
+  try {
+    await new Promise(r => setTimeout(r, 1000));
+    const audit = await channel.guild.fetchAuditLogs({ type: AuditLogEvent.ChannelDelete, limit: 1 });
+    const entry = audit.entries.first();
+    if (entry) deleter = entry.executor?.tag || 'Unknown';
+  } catch {}
+
+  const event = {
+    type: 'channelDelete',
+    detail: `#${channel.name} deleted by ${deleter}`
+  };
+  await pushLogEvent(channel.guild.id, event);
+
+  const embed = new EmbedBuilder()
+    .setColor(LOG_COLORS.channelDelete)
+    .setTitle('🗑️ Channel Deleted')
+    .addFields(
+      { name: 'Channel', value: `#${channel.name}`, inline: true },
+      { name: 'Deleted by', value: deleter, inline: true }
+    )
+    .setFooter({ text: `JARVIS Logs • ${channel.guild.name}` })
+    .setTimestamp();
+
+  await sendLog(channel.guild.id, embed);
+});
+
+// ─── Role Create ──────────────────────────────────────────────
+client.on('roleCreate', async (role) => {
+  let creator = 'Unknown';
+  try {
+    await new Promise(r => setTimeout(r, 1000));
+    const audit = await role.guild.fetchAuditLogs({ type: AuditLogEvent.RoleCreate, limit: 1 });
+    const entry = audit.entries.first();
+    if (entry) creator = entry.executor?.tag || 'Unknown';
+  } catch {}
+
+  const event = { type: 'roleCreate', detail: `@${role.name} created by ${creator}` };
+  await pushLogEvent(role.guild.id, event);
+
+  const embed = new EmbedBuilder()
+    .setColor(LOG_COLORS.roleCreate)
+    .setTitle('🎭 Role Created')
+    .addFields(
+      { name: 'Role', value: `<@&${role.id}> (${role.name})`, inline: true },
+      { name: 'Created by', value: creator, inline: true }
+    )
+    .setFooter({ text: `JARVIS Logs • ${role.guild.name}` })
+    .setTimestamp();
+
+  await sendLog(role.guild.id, embed);
+});
+
+// ─── Role Delete ──────────────────────────────────────────────
+client.on('roleDelete', async (role) => {
+  let deleter = 'Unknown';
+  try {
+    await new Promise(r => setTimeout(r, 1000));
+    const audit = await role.guild.fetchAuditLogs({ type: AuditLogEvent.RoleDelete, limit: 1 });
+    const entry = audit.entries.first();
+    if (entry) deleter = entry.executor?.tag || 'Unknown';
+  } catch {}
+
+  const event = { type: 'roleDelete', detail: `@${role.name} deleted by ${deleter}` };
+  await pushLogEvent(role.guild.id, event);
+
+  const embed = new EmbedBuilder()
+    .setColor(LOG_COLORS.roleDelete)
+    .setTitle('🗑️ Role Deleted')
+    .addFields(
+      { name: 'Role', value: role.name, inline: true },
+      { name: 'Deleted by', value: deleter, inline: true }
+    )
+    .setFooter({ text: `JARVIS Logs • ${role.guild.name}` })
+    .setTimestamp();
+
+  await sendLog(role.guild.id, embed);
+});
+
+// ─── Nickname Change ──────────────────────────────────────────
+client.on('guildMemberUpdate', async (oldMember, newMember) => {
+  if (oldMember.nickname === newMember.nickname) return;
+
+  const event = {
+    type: 'nickChange',
+    userId: newMember.id,
+    username: newMember.user.tag,
+    detail: `${oldMember.nickname || 'none'} → ${newMember.nickname || 'none'}`
+  };
+  await pushLogEvent(newMember.guild.id, event);
+
+  const embed = new EmbedBuilder()
+    .setColor(LOG_COLORS.nickChange)
+    .setTitle('📝 Nickname Changed')
+    .addFields(
+      { name: 'User', value: `<@${newMember.id}> (${newMember.user.tag})`, inline: true },
+      { name: 'Before', value: oldMember.nickname || '*none*', inline: true },
+      { name: 'After',  value: newMember.nickname || '*none*', inline: true }
+    )
+    .setFooter({ text: `JARVIS Logs • ${newMember.guild.name}` })
+    .setTimestamp();
+
+  await sendLog(newMember.guild.id, embed);
+});
+
+// ─── Voice State ──────────────────────────────────────────────
+client.on('voiceStateUpdate', async (oldState, newState) => {
+  if (!newState.guild) return;
+  const user = newState.member?.user;
+  if (!user || user.bot) return;
+
+  let type, title;
+
+  if (!oldState.channel && newState.channel) {
+    type = 'voiceJoin';
+    title = '🔊 Joined Voice';
+  } else if (oldState.channel && !newState.channel) {
+    type = 'voiceLeave';
+    title = '🔇 Left Voice';
+  } else if (oldState.channel && newState.channel && oldState.channel.id !== newState.channel.id) {
+    type = 'voiceMove';
+    title = '🔀 Moved Voice Channel';
+  } else {
+    return;
+  }
+
+  const event = {
+    type,
+    userId: user.id,
+    username: user.tag,
+    detail: `${oldState.channel?.name || '—'} → ${newState.channel?.name || '—'}`
+  };
+  await pushLogEvent(newState.guild.id, event);
+
+  const embed = new EmbedBuilder()
+    .setColor(LOG_COLORS[type])
+    .setTitle(title)
+    .addFields(
+      { name: 'User', value: `<@${user.id}> (${user.tag})`, inline: true },
+      ...(type === 'voiceMove'
+        ? [{ name: 'From', value: oldState.channel.name, inline: true }, { name: 'To', value: newState.channel.name, inline: true }]
+        : [{ name: 'Channel', value: (newState.channel || oldState.channel)?.name || '?', inline: true }]
+      )
+    )
+    .setFooter({ text: `JARVIS Logs • ${newState.guild.name}` })
+    .setTimestamp();
+
+  await sendLog(newState.guild.id, embed);
+});
+
+// =========================
 // PROMPT ENGINE
 // =========================
 function enhancePrompt(prompt) {
@@ -174,7 +612,6 @@ function splitMessage(text, maxLength = 1900) {
 // =========================
 const commands = [
   new SlashCommandBuilder().setName('ping').setDescription('Check bot latency').setDMPermission(true),
-
   new SlashCommandBuilder().setName('servers').setDescription('List servers (owner only)').setDMPermission(true),
 
   new SlashCommandBuilder()
@@ -254,6 +691,7 @@ const commands = [
 
   new SlashCommandBuilder().setName('portfolio').setDescription('Get information about creator.').setDMPermission(true),
   new SlashCommandBuilder().setName('websites').setDescription('Get creator websites.').setDMPermission(true),
+
   new SlashCommandBuilder()
     .setName('ask')
     .setDescription('Ask JARVIS anything')
@@ -278,87 +716,104 @@ const commands = [
         )
     ).setDMPermission(true),
 
-    new SlashCommandBuilder()
-  .setName('roast')
-  .setDescription('Roast a user 🔥')
-  .addUserOption(o => o.setName('user').setDescription('User to roast').setRequired(true))
-  .setDMPermission(true),
-
-    new SlashCommandBuilder()
-  .setName('browse')
-  .setDescription('Fetch and summarize any website')
-  .addStringOption(o =>
-    o.setName('url').setDescription('Website URL').setRequired(true)
-  ).setDMPermission(true),
+  new SlashCommandBuilder()
+    .setName('roast')
+    .setDescription('Roast a user 🔥')
+    .addUserOption(o => o.setName('user').setDescription('User to roast').setRequired(true))
+    .setDMPermission(true),
 
   new SlashCommandBuilder()
-  .setName('trivia')
-  .setDescription('Answer an AI trivia question')
-  .setDMPermission(true),
-
-new SlashCommandBuilder()
-  .setName('wouldyourather')
-  .setDescription('Would you rather...')
-  .setDMPermission(true),
-
-new SlashCommandBuilder()
-  .setName('warn')
-  .setDescription('Warn a user')
-  .addUserOption(o => o.setName('user').setDescription('User to warn').setRequired(true))
-  .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(true))
-  .setDMPermission(true),
-
-new SlashCommandBuilder()
-  .setName('warnings')
-  .setDescription('Check warnings for a user')
-  .addUserOption(o => o.setName('user').setDescription('User to check').setRequired(true))
-  .setDMPermission(true),
-
-new SlashCommandBuilder()
-  .setName('news')
-  .setDescription('Get latest news on a topic')
-  .addStringOption(o => o.setName('topic').setDescription('Topic to search').setRequired(true))
-  .setDMPermission(true),
-
-new SlashCommandBuilder()
-  .setName('define')
-  .setDescription('Define a word')
-  .addStringOption(o => o.setName('word').setDescription('Word to define').setRequired(true))
-  .setDMPermission(true),
-
+    .setName('browse')
+    .setDescription('Fetch and summarize any website')
+    .addStringOption(o =>
+      o.setName('url').setDescription('Website URL').setRequired(true)
+    ).setDMPermission(true),
 
   new SlashCommandBuilder()
-  .setName('clearwarnings')
-  .setDescription('Clear all warnings for a user')
-  .addUserOption(o => o.setName('user').setDescription('User to clear').setRequired(true))
-  .setDMPermission(true),
- 
-new SlashCommandBuilder()
-  .setName('kick')
-  .setDescription('Kick a user from the server')
-  .addUserOption(o => o.setName('user').setDescription('User to kick').setRequired(true))
-  .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false))
-  .setDMPermission(true),
- 
-new SlashCommandBuilder()
-  .setName('timeout')
-  .setDescription('Timeout a user')
-  .addUserOption(o => o.setName('user').setDescription('User to timeout').setRequired(true))
-  .addIntegerOption(o => o.setName('minutes').setDescription('Duration in minutes').setRequired(true).setMinValue(1).setMaxValue(40320))
-  .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false))
-  .setDMPermission(true),
- 
-new SlashCommandBuilder()
-  .setName('leaderboard')
-  .setDescription('Show trivia leaderboard')
-  .setDMPermission(true),
- 
-new SlashCommandBuilder()
-  .setName('8ball')
-  .setDescription('Ask the magic 8ball a question')
-  .addStringOption(o => o.setName('question').setDescription('Your yes/no question').setRequired(true))
-  .setDMPermission(true),
+    .setName('trivia')
+    .setDescription('Answer an AI trivia question')
+    .setDMPermission(true),
 
+  new SlashCommandBuilder()
+    .setName('wouldyourather')
+    .setDescription('Would you rather...')
+    .setDMPermission(true),
+
+  new SlashCommandBuilder()
+    .setName('warn')
+    .setDescription('Warn a user')
+    .addUserOption(o => o.setName('user').setDescription('User to warn').setRequired(true))
+    .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(true))
+    .setDMPermission(true),
+
+  new SlashCommandBuilder()
+    .setName('warnings')
+    .setDescription('Check warnings for a user')
+    .addUserOption(o => o.setName('user').setDescription('User to check').setRequired(true))
+    .setDMPermission(true),
+
+  new SlashCommandBuilder()
+    .setName('news')
+    .setDescription('Get latest news on a topic')
+    .addStringOption(o => o.setName('topic').setDescription('Topic to search').setRequired(true))
+    .setDMPermission(true),
+
+  new SlashCommandBuilder()
+    .setName('define')
+    .setDescription('Define a word')
+    .addStringOption(o => o.setName('word').setDescription('Word to define').setRequired(true))
+    .setDMPermission(true),
+
+  new SlashCommandBuilder()
+    .setName('clearwarnings')
+    .setDescription('Clear all warnings for a user')
+    .addUserOption(o => o.setName('user').setDescription('User to clear').setRequired(true))
+    .setDMPermission(true),
+
+  new SlashCommandBuilder()
+    .setName('kick')
+    .setDescription('Kick a user from the server')
+    .addUserOption(o => o.setName('user').setDescription('User to kick').setRequired(true))
+    .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false))
+    .setDMPermission(true),
+
+  new SlashCommandBuilder()
+    .setName('timeout')
+    .setDescription('Timeout a user')
+    .addUserOption(o => o.setName('user').setDescription('User to timeout').setRequired(true))
+    .addIntegerOption(o => o.setName('minutes').setDescription('Duration in minutes').setRequired(true).setMinValue(1).setMaxValue(40320))
+    .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false))
+    .setDMPermission(true),
+
+  new SlashCommandBuilder()
+    .setName('leaderboard')
+    .setDescription('Show trivia leaderboard')
+    .setDMPermission(true),
+
+  new SlashCommandBuilder()
+    .setName('8ball')
+    .setDescription('Ask the magic 8ball a question')
+    .addStringOption(o => o.setName('question').setDescription('Your yes/no question').setRequired(true))
+    .setDMPermission(true),
+
+  // ─── NEW LOGGING COMMANDS ────────────────────────────────────
+  new SlashCommandBuilder()
+    .setName('setlogchannel')
+    .setDescription('Set the channel where JARVIS sends server logs')
+    .addChannelOption(o =>
+      o.setName('channel').setDescription('Log channel').setRequired(true)
+    )
+    .setDMPermission(false),
+
+  new SlashCommandBuilder()
+    .setName('disablelogs')
+    .setDescription('Disable server logging for this server')
+    .setDMPermission(false),
+
+  new SlashCommandBuilder()
+    .setName('logs')
+    .setDescription('View recent server log events (last 10)')
+    .setDMPermission(false),
 
 ].map(c => c.toJSON());
 
@@ -367,16 +822,15 @@ new SlashCommandBuilder()
 // =========================
 async function deployCommands() {
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-  
-  // Add this — tells Discord these commands work in DMs and user installs
+
   const dmCommands = commands.map(cmd => ({
     ...cmd,
-    integration_types: [0, 1], // 0 = guild, 1 = user install
-    contexts: [0, 1, 2]        // 0 = guild, 1 = bot DM, 2 = private DM/group
+    integration_types: [0, 1],
+    contexts: [0, 1, 2]
   }));
 
   const result = await rest.put(
-    Routes.applicationCommands(process.env.CLIENT_ID), 
+    Routes.applicationCommands(process.env.CLIENT_ID),
     { body: dmCommands }
   );
   console.log(`✅ Deployed ${result.length} commands`);
@@ -413,41 +867,37 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (interaction.commandName === 'clearmemory') {
-  if (!isOwner(interaction.user.id)) {
-    return interaction.reply({ content: "no permission", flags: 64 });
-  }
-
-  const target = interaction.options.getString('target');
-
-  if (target === "all") {
-    // Wipe everything except persistent config
-    const keep = {
-      ownerConfirmed: memory.ownerConfirmed,
-      modes: memory.modes,
-      ratings: memory.ratings,
-      feedback: memory.feedback,
-    };
-    memory = keep;
-    await saveMemory(memory);
-    return interaction.reply({ content: "💀 all conversation memory cleared" });
-
-  } else {
-    // Delete every key that contains the user ID
-    let deleted = 0;
-    for (const key of Object.keys(memory)) {
-      if (key.includes(target)) {
-        delete memory[key];
-        deleted++;
-      }
+    if (!isOwner(interaction.user.id)) {
+      return interaction.reply({ content: "no permission", flags: 64 });
     }
-    await saveMemory(memory);
-    return interaction.reply({
-      content: deleted > 0
-        ? `🧠 cleared ${deleted} memory key(s) for \`${target}\``
-        : `❌ no memory found for \`${target}\``
-    });
+    const target = interaction.options.getString('target');
+    if (target === "all") {
+      const keep = {
+        ownerConfirmed: memory.ownerConfirmed,
+        modes: memory.modes,
+        ratings: memory.ratings,
+        feedback: memory.feedback,
+        logChannels: memory.logChannels,
+      };
+      memory = keep;
+      await saveMemory(memory);
+      return interaction.reply({ content: "💀 all conversation memory cleared" });
+    } else {
+      let deleted = 0;
+      for (const key of Object.keys(memory)) {
+        if (key.includes(target)) {
+          delete memory[key];
+          deleted++;
+        }
+      }
+      await saveMemory(memory);
+      return interaction.reply({
+        content: deleted > 0
+          ? `🧠 cleared ${deleted} memory key(s) for \`${target}\``
+          : `❌ no memory found for \`${target}\``
+      });
+    }
   }
-}
 
   if (interaction.commandName === 'invite') {
     return interaction.reply({ content: `🚀 Invite me here:\n👉 https://jarvisbot-rust.vercel.app/` });
@@ -493,23 +943,18 @@ client.on('interactionCreate', async (interaction) => {
       if (url.includes("youtu.be/")) videoId = url.split("youtu.be/")[1].split("?")[0];
       else if (url.includes("watch?v=")) videoId = url.split("watch?v=")[1].split("&")[0];
       else if (url.includes("/shorts/")) videoId = url.split("/shorts/")[1].split("?")[0];
-
       if (!videoId) return interaction.editReply("❌ Invalid YouTube link");
-
       const videoRes = await axios.get(`https://www.googleapis.com/youtube/v3/videos`, {
         params: { key: process.env.YOUTUBE_API_KEY, id: videoId, part: "snippet,statistics" }
       });
-
       const video = videoRes.data.items[0];
       if (!video) return interaction.editReply("❌ Video not found");
-
       const title = video.snippet.title;
       const desc = video.snippet.description.slice(0, 1500);
       const channelName = video.snippet.channelTitle;
       const thumbnail = video.snippet.thumbnails.high.url;
       const views = video.statistics.viewCount;
       const likes = video.statistics.likeCount || "hidden";
-
       const ai = await groq.chat.completions.create({
         model: "meta-llama/llama-3.1-8b-instruct",
         messages: [
@@ -517,9 +962,7 @@ client.on('interactionCreate', async (interaction) => {
           { role: "user", content: `Title: ${title}\n\nDescription:\n${desc}` }
         ]
       });
-
       const summary = ai.choices[0].message.content;
-
       const embed = new EmbedBuilder()
         .setColor(0xff0000)
         .setTitle(title)
@@ -532,7 +975,6 @@ client.on('interactionCreate', async (interaction) => {
         )
         .setDescription(`🧠 **Summary:**\n${summary}`)
         .setFooter({ text: "JARVIS AI • YouTube Analyzer" });
-
       return interaction.editReply({ embeds: [embed] });
     } catch (err) {
       console.error(err);
@@ -596,7 +1038,6 @@ client.on('interactionCreate', async (interaction) => {
 /help - show this message
 /ask - ask JARVIS anything
 /mode - switch personality
-/generate - generate AI image
 /summarize - summarize text
 /translate - translate text
 /code - generate code
@@ -625,6 +1066,9 @@ client.on('interactionCreate', async (interaction) => {
 /timeout - timeout a user for X minutes (mod only)
 /leaderboard - show trivia score leaderboard
 /8ball - ask the magic 8ball
+/setlogchannel - set the log channel (admin only)
+/disablelogs - disable server logging (admin only)
+/logs - view recent log events
 `)
       ]
     });
@@ -675,56 +1119,56 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (interaction.commandName === 'poll') {
-  if (!interaction.guild) {
-    return interaction.reply({ content: "❌ Polls only work in servers.", flags: 64 });
+    if (!interaction.guild) {
+      return interaction.reply({ content: "❌ Polls only work in servers.", flags: 64 });
+    }
+    const q = interaction.options.getString('question');
+    const msg = await interaction.reply({ content: `📊 ${q}`, fetchReply: true });
+    await msg.react("👍");
+    await msg.react("👎");
   }
-  const q = interaction.options.getString('question');
-  const msg = await interaction.reply({ content: `📊 ${q}`, fetchReply: true });
-  await msg.react("👍");
-  await msg.react("👎");
-}
 
   if (interaction.commandName === 'stats') {
-  if (!interaction.guild) {
-    return interaction.reply({ content: "❌ Server stats only work in a server lol", flags: 64 });
+    if (!interaction.guild) {
+      return interaction.reply({ content: "❌ Server stats only work in a server lol", flags: 64 });
+    }
+    const g = interaction.guild;
+    return interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle("📊 Server Stats")
+          .addFields(
+            { name: "Members", value: `${g.memberCount}` },
+            { name: "Channels", value: `${g.channels.cache.size}` }
+          )
+      ]
+    });
   }
-  const g = interaction.guild;
-  return interaction.reply({
-    embeds: [
-      new EmbedBuilder()
-        .setTitle("📊 Server Stats")
-        .addFields(
-          { name: "Members", value: `${g.memberCount}` },
-          { name: "Channels", value: `${g.channels.cache.size}` }
-        )
-    ]
-  });
-}
 
   if (interaction.commandName === 'remind') {
-  const text = interaction.options.getString('text');
-  const sec = interaction.options.getInteger('seconds');
-  await interaction.reply(`⏳ Reminder set for ${sec} seconds!`);
-  setTimeout(async () => {
-    try {
-      await interaction.followUp(`⏰ <@${interaction.user.id}> Reminder: ${text}`);
-    } catch (err) {
-      console.error("Reminder followUp failed:", err);
-    }
-  }, sec * 1000);
-}
+    const text = interaction.options.getString('text');
+    const sec = interaction.options.getInteger('seconds');
+    await interaction.reply(`⏳ Reminder set for ${sec} seconds!`);
+    setTimeout(async () => {
+      try {
+        await interaction.followUp(`⏰ <@${interaction.user.id}> Reminder: ${text}`);
+      } catch (err) {
+        console.error("Reminder followUp failed:", err);
+      }
+    }, sec * 1000);
+  }
 
   if (interaction.commandName === 'ban') {
-  if (!interaction.guild) {
-    return interaction.reply({ content: "❌ Can't ban people in DMs 💀", flags: 64 });
+    if (!interaction.guild) {
+      return interaction.reply({ content: "❌ Can't ban people in DMs 💀", flags: 64 });
+    }
+    if (!interaction.member.permissions.has("BanMembers")) {
+      return interaction.reply("❌ no permission");
+    }
+    const user = interaction.options.getUser('user');
+    await interaction.guild.members.ban(user.id);
+    return interaction.reply(`🔨 banned ${user.tag}`);
   }
-  if (!interaction.member.permissions.has("BanMembers")) {
-    return interaction.reply("❌ no permission");
-  }
-  const user = interaction.options.getUser('user');
-  await interaction.guild.members.ban(user.id);
-  return interaction.reply(`🔨 banned ${user.tag}`);
-}
 
   if (interaction.commandName === 'search') {
     const q = interaction.options.getString('query');
@@ -734,12 +1178,9 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.commandName === 'ask') {
     await interaction.deferReply();
     const question = interaction.options.getString('question');
-
-    // Sanitize: block mass ping attempts via slash command too
     if (question.toLowerCase().includes('@everyone') || question.toLowerCase().includes('@here')) {
       return interaction.editReply("nah not doing that 💀");
     }
-
     try {
       const res = await groq.chat.completions.create({
         model: "meta-llama/llama-3.1-8b-instruct",
@@ -755,24 +1196,20 @@ Never write @everyone or @here in your reply.`
         temperature: 0.8,
         max_tokens: 600
       });
-
       let answer = res.choices[0].message.content
         .replace(/@everyone/gi, '`@everyone`')
         .replace(/@here/gi, '`@here`');
-
-      // Split if too long
       const chunks = [];
       for (let i = 0; i < answer.length; i += 1900) chunks.push(answer.slice(i, i + 1900));
-
       await interaction.editReply(chunks[0]);
       for (let i = 1; i < chunks.length; i++) await interaction.followUp(chunks[i]);
-
     } catch (err) {
       console.error(err);
       return interaction.editReply("brain broke rq, try again 💀");
     }
   }
-    if (interaction.commandName === 'roast') {
+
+  if (interaction.commandName === 'roast') {
     if (isOnCooldown(interaction.user.id)) {
       const remaining = ((COOLDOWN_MS - (Date.now() - cooldowns.get(interaction.user.id))) / 1000).toFixed(1);
       return interaction.reply({ content: `⏳ slow down! wait **${remaining}s** before using another AI command.`, flags: 64 });
@@ -830,6 +1267,25 @@ Never write @everyone or @here in your reply.`
     const reason = interaction.options.getString('reason') || 'No reason given';
     try {
       await interaction.guild.members.kick(target.id, reason);
+      // Log the kick
+      const event = {
+        type: 'kick',
+        userId: target.id,
+        username: target.tag,
+        detail: `Kicked by ${interaction.user.tag} — ${reason}`
+      };
+      await pushLogEvent(interaction.guild.id, event);
+      const logEmbed = new EmbedBuilder()
+        .setColor(LOG_COLORS.kick)
+        .setTitle('👢 Member Kicked')
+        .addFields(
+          { name: 'User', value: `${target.tag}`, inline: true },
+          { name: 'Moderator', value: interaction.user.tag, inline: true },
+          { name: 'Reason', value: reason }
+        )
+        .setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` })
+        .setTimestamp();
+      await sendLog(interaction.guild.id, logEmbed);
       return interaction.reply(`👢 **${target.username}** has been kicked. Reason: ${reason}`);
     } catch (err) {
       console.error(err);
@@ -848,6 +1304,26 @@ Never write @everyone or @here in your reply.`
     try {
       const member = await interaction.guild.members.fetch(target.id);
       await member.timeout(minutes * 60 * 1000, reason);
+      // Log the timeout
+      const event = {
+        type: 'timeout',
+        userId: target.id,
+        username: target.tag,
+        detail: `Timed out ${minutes}m by ${interaction.user.tag} — ${reason}`
+      };
+      await pushLogEvent(interaction.guild.id, event);
+      const logEmbed = new EmbedBuilder()
+        .setColor(LOG_COLORS.timeout)
+        .setTitle('🔇 Member Timed Out')
+        .addFields(
+          { name: 'User', value: `${target.tag}`, inline: true },
+          { name: 'Duration', value: `${minutes} minute(s)`, inline: true },
+          { name: 'Moderator', value: interaction.user.tag, inline: true },
+          { name: 'Reason', value: reason }
+        )
+        .setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` })
+        .setTimestamp();
+      await sendLog(interaction.guild.id, logEmbed);
       return interaction.reply(`🔇 **${target.username}** timed out for **${minutes} minute(s)**. Reason: ${reason}`);
     } catch (err) {
       console.error(err);
@@ -905,170 +1381,246 @@ Never write @everyone or @here in your reply.`
     ];
     return interaction.reply(`🎱 **Q: ${question}**\n${responses[Math.floor(Math.random() * responses.length)]}`);
   }
-  // =========================
-  // /mode — switch personality
-  // =========================
+
   if (interaction.commandName === 'mode') {
     const selectedMode = interaction.options.getString('mode');
     const guildId = interaction.guild?.id || 'dm';
-
     memory.modes = memory.modes || {};
     memory.modes[guildId] = selectedMode;
     saveMemory(memory);
-
     const m = MODES[selectedMode];
     return interaction.reply(`${m.emoji} Switched to **${m.label}** — ${getModeDescription(selectedMode)}`);
   }
 
   if (interaction.commandName === 'browse') {
-  await interaction.deferReply();
-  let url = interaction.options.getString('url');
-  if (!url.startsWith('http')) url = 'https://' + url;
+    await interaction.deferReply();
+    let url = interaction.options.getString('url');
+    if (!url.startsWith('http')) url = 'https://' + url;
+    try {
+      const res = await axios.get(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+        timeout: 8000
+      });
+      const text = res.data
+        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 3000);
+      if (!text) return interaction.editReply('❌ Could not extract text from that page.');
+      const ai = await groq.chat.completions.create({
+        model: 'meta-llama/llama-3.1-8b-instruct',
+        messages: [
+          { role: 'system', content: 'Summarize the following webpage content clearly and concisely in a few bullet points. Always mention the author, creator, or owner of the website if found anywhere in the content. No fluff.' },
+          { role: 'user', content: `URL: ${url}\n\nContent:\n${text}` }
+        ],
+        max_tokens: 400
+      });
+      const summary = ai.choices[0].message.content;
+      const key = `${interaction.guild?.id || 'dm'}-${interaction.channelId}`;
+      if (!memory[key]) memory[key] = { messages: [] };
+      memory[key].messages.push(
+        { role: 'user', content: `${interaction.user.username}: browsed ${url}` },
+        { role: 'assistant', content: summary }
+      );
+      if (memory[key].messages.length > 20) memory[key].messages.splice(0, 2);
+      saveMemory(memory);
+      return interaction.editReply(`🌐 **${url}**\n\n${summary}`);
+    } catch (err) {
+      console.error(err);
+      return interaction.editReply('❌ Could not access that website. It might be blocked or down.');
+    }
+  }
 
-  try {
-    const res = await axios.get(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-      timeout: 8000
-    });
+  if (interaction.commandName === 'wouldyourather') {
+    await interaction.deferReply();
+    try {
+      const res = await groq.chat.completions.create({
+        model: 'meta-llama/llama-3.1-8b-instruct',
+        messages: [
+          {
+            role: 'system',
+            content: 'Generate a fun and creative "would you rather" question with two wild options. Format exactly like:\nWould you rather...\n🅰️ Option 1\n🅱️ Option 2'
+          },
+          { role: 'user', content: 'Give me a would you rather question.' }
+        ],
+        temperature: 1.0,
+        max_tokens: 100
+      });
+      return interaction.editReply(res.choices[0].message.content);
+    } catch (err) {
+      console.error(err);
+      return interaction.editReply('❌ failed rq');
+    }
+  }
 
-    const text = res.data
-      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 3000);
-
-    if (!text) return interaction.editReply('❌ Could not extract text from that page.');
-
-    const ai = await groq.chat.completions.create({
-      model: 'meta-llama/llama-3.1-8b-instruct',
-      messages: [
-        { role: 'system', content: 'Summarize the following webpage content clearly and concisely in a few bullet points. Always mention the author, creator, or owner of the website if found anywhere in the content. No fluff.' },
-        { role: 'user', content: `URL: ${url}\n\nContent:\n${text}` }
-      ],
-      max_tokens: 400
-    });
-
-    const summary = ai.choices[0].message.content;
-
-    // ✅ Save to memory so follow-up questions have context
-    const key = `${interaction.guild?.id || 'dm'}-${interaction.channelId}`;
-    if (!memory[key]) memory[key] = { messages: [] };
-    memory[key].messages.push(
-      { role: 'user', content: `${interaction.user.username}: browsed ${url}` },
-      { role: 'assistant', content: summary }
-    );
-    if (memory[key].messages.length > 20) memory[key].messages.splice(0, 2);
+  if (interaction.commandName === 'warn') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    if (!interaction.member.permissions.has('ModerateMembers')) {
+      return interaction.reply({ content: '❌ no permission', flags: 64 });
+    }
+    const target = interaction.options.getUser('user');
+    const reason = interaction.options.getString('reason');
+    const key = `warns-${interaction.guild.id}-${target.id}`;
+    memory[key] = memory[key] || [];
+    memory[key].push({ reason, by: interaction.user.username, time: Date.now() });
     saveMemory(memory);
-
-    return interaction.editReply(`🌐 **${url}**\n\n${summary}`);
-
-  } catch (err) {
-    console.error(err);
-    return interaction.editReply('❌ Could not access that website. It might be blocked or down.');
+    // Log the warn
+    const event = {
+      type: 'warn',
+      userId: target.id,
+      username: target.tag,
+      detail: `Warned by ${interaction.user.tag} — ${reason}`
+    };
+    await pushLogEvent(interaction.guild.id, event);
+    const logEmbed = new EmbedBuilder()
+      .setColor(LOG_COLORS.warn)
+      .setTitle('⚠️ Member Warned')
+      .addFields(
+        { name: 'User', value: `${target.tag}`, inline: true },
+        { name: 'Moderator', value: interaction.user.tag, inline: true },
+        { name: 'Total Warnings', value: `${memory[key].length}`, inline: true },
+        { name: 'Reason', value: reason }
+      )
+      .setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` })
+      .setTimestamp();
+    await sendLog(interaction.guild.id, logEmbed);
+    try {
+      await target.send(`⚠️ You were warned in **${interaction.guild.name}**\nReason: ${reason}`);
+    } catch {}
+    return interaction.reply(`⚠️ **${target.username}** has been warned. Total warnings: **${memory[key].length}**`);
   }
-}
 
-if (interaction.commandName === 'wouldyourather') {
-  await interaction.deferReply();
-  try {
-    const res = await groq.chat.completions.create({
-      model: 'meta-llama/llama-3.1-8b-instruct',
-      messages: [
-        {
-          role: 'system',
-          content: 'Generate a fun and creative "would you rather" question with two wild options. Format exactly like:\nWould you rather...\n🅰️ Option 1\n🅱️ Option 2'
-        },
-        { role: 'user', content: 'Give me a would you rather question.' }
-      ],
-      temperature: 1.0,
-      max_tokens: 100
-    });
-
-    return interaction.editReply(res.choices[0].message.content);
-  } catch (err) {
-    console.error(err);
-    return interaction.editReply('❌ failed rq');
+  if (interaction.commandName === 'warnings') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    const target = interaction.options.getUser('user');
+    const key = `warns-${interaction.guild.id}-${target.id}`;
+    const warns = memory[key] || [];
+    if (warns.length === 0) return interaction.reply(`✅ **${target.username}** has no warnings.`);
+    const list = warns.map((w, i) => `${i + 1}. ${w.reason} — by ${w.by}`).join('\n');
+    return interaction.reply(`⚠️ **${target.username}** has **${warns.length}** warning(s):\n${list}`);
   }
-}
 
-if (interaction.commandName === 'warn') {
-  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
-  if (!interaction.member.permissions.has('ModerateMembers')) {
-    return interaction.reply({ content: '❌ no permission', flags: 64 });
+  if (interaction.commandName === 'news') {
+    await interaction.deferReply();
+    const topic = interaction.options.getString('topic');
+    try {
+      const res = await axios.get('https://newsapi.org/v2/everything', {
+        params: {
+          q: topic,
+          pageSize: 5,
+          sortBy: 'publishedAt',
+          language: 'en',
+          apiKey: process.env.NEWS_API_KEY
+        }
+      });
+      const articles = res.data.articles;
+      if (!articles || articles.length === 0) return interaction.editReply('❌ No news found.');
+      const formatted = articles.map(a => `**${a.title}**\n🔗 ${a.url}`).join('\n\n');
+      return interaction.editReply(`📰 **News: ${topic}**\n\n${formatted}`);
+    } catch (err) {
+      console.error(err);
+      return interaction.editReply('❌ Could not fetch news. Make sure NEWS_API_KEY is set.');
+    }
   }
-  const target = interaction.options.getUser('user');
-  const reason = interaction.options.getString('reason');
-  const key = `warns-${interaction.guild.id}-${target.id}`;
-  memory[key] = memory[key] || [];
-  memory[key].push({ reason, by: interaction.user.username, time: Date.now() });
-  saveMemory(memory);
 
-  try {
-    await target.send(`⚠️ You were warned in **${interaction.guild.name}**\nReason: ${reason}`);
-  } catch {}
-
-  return interaction.reply(`⚠️ **${target.username}** has been warned. Total warnings: **${memory[key].length}**`);
-}
-
-if (interaction.commandName === 'warnings') {
-  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
-  const target = interaction.options.getUser('user');
-  const key = `warns-${interaction.guild.id}-${target.id}`;
-  const warns = memory[key] || [];
-
-  if (warns.length === 0) return interaction.reply(`✅ **${target.username}** has no warnings.`);
-
-  const list = warns.map((w, i) => `${i + 1}. ${w.reason} — by ${w.by}`).join('\n');
-  return interaction.reply(`⚠️ **${target.username}** has **${warns.length}** warning(s):\n${list}`);
-}
-
-if (interaction.commandName === 'news') {
-  await interaction.deferReply();
-  const topic = interaction.options.getString('topic');
-  try {
-    const res = await axios.get('https://newsapi.org/v2/everything', {
-      params: {
-        q: topic,
-        pageSize: 5,
-        sortBy: 'publishedAt',
-        language: 'en',
-        apiKey: process.env.NEWS_API_KEY
-      }
-    });
-
-    const articles = res.data.articles;
-    if (!articles || articles.length === 0) return interaction.editReply('❌ No news found.');
-
-    const formatted = articles.map(a => `**${a.title}**\n🔗 ${a.url}`).join('\n\n');
-    return interaction.editReply(`📰 **News: ${topic}**\n\n${formatted}`);
-  } catch (err) {
-    console.error(err);
-    return interaction.editReply('❌ Could not fetch news. Make sure NEWS_API_KEY is set.');
+  if (interaction.commandName === 'define') {
+    await interaction.deferReply();
+    const word = interaction.options.getString('word');
+    try {
+      const res = await axios.get(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`);
+      const entry = res.data[0];
+      const meaning = entry.meanings[0];
+      const def = meaning.definitions[0];
+      let reply = `📖 **${entry.word}** *(${meaning.partOfSpeech})*\n${def.definition}`;
+      if (def.example) reply += `\n*"${def.example}"*`;
+      return interaction.editReply(reply);
+    } catch (err) {
+      return interaction.editReply(`❌ No definition found for **${word}**.`);
+    }
   }
-}
 
-if (interaction.commandName === 'define') {
-  await interaction.deferReply();
-  const word = interaction.options.getString('word');
-  try {
-    const res = await axios.get(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`);
-    const entry = res.data[0];
-    const meaning = entry.meanings[0];
-    const def = meaning.definitions[0];
+  // =========================
+  // LOGGING SLASH COMMANDS
+  // =========================
 
-    let reply = `📖 **${entry.word}** *(${meaning.partOfSpeech})*\n${def.definition}`;
-    if (def.example) reply += `\n*"${def.example}"*`;
+  if (interaction.commandName === 'setlogchannel') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    if (!interaction.member.permissions.has('ManageGuild')) {
+      return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
+    }
+    const channel = interaction.options.getChannel('channel');
+    memory.logChannels = memory.logChannels || {};
+    memory.logChannels[interaction.guild.id] = channel.id;
+    await saveMemory(memory);
 
-    return interaction.editReply(reply);
-  } catch (err) {
-    return interaction.editReply(`❌ No definition found for **${word}**.`);
+    const confirmEmbed = new EmbedBuilder()
+      .setColor(0x57f287)
+      .setTitle('✅ Log Channel Set')
+      .setDescription(`JARVIS will now send server logs to <#${channel.id}>.`)
+      .addFields(
+        { name: 'Events logged', value: 'Member join/leave • Message delete/edit • Bans/unbans • Kicks • Timeouts • Channel create/delete • Role create/delete • Nickname changes • Voice activity • Warnings', }
+      )
+      .setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` })
+      .setTimestamp();
+
+    return interaction.reply({ embeds: [confirmEmbed] });
   }
-}
+
+  if (interaction.commandName === 'disablelogs') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    if (!interaction.member.permissions.has('ManageGuild')) {
+      return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
+    }
+    if (memory.logChannels?.[interaction.guild.id]) {
+      delete memory.logChannels[interaction.guild.id];
+      await saveMemory(memory);
+      return interaction.reply('🔕 Logging disabled for this server.');
+    } else {
+      return interaction.reply({ content: '❌ Logging is not currently enabled.', flags: 64 });
+    }
+  }
+
+  if (interaction.commandName === 'logs') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    try {
+      const key = `logs-${interaction.guild.id}`;
+      const existing = await redis.get(key);
+      const logs = existing ? JSON.parse(existing) : [];
+      if (logs.length === 0) return interaction.reply({ content: '📭 No log events recorded yet.', flags: 64 });
+
+      const typeEmoji = {
+        join: '📥', leave: '📤', ban: '🔨', unban: '✅', kick: '👢',
+        timeout: '🔇', messageDelete: '🗑️', messageEdit: '✏️',
+        channelCreate: '📢', channelDelete: '🗑️', roleCreate: '🎭',
+        roleDelete: '🗑️', voiceJoin: '🔊', voiceLeave: '🔇', voiceMove: '🔀',
+        warn: '⚠️', nickChange: '📝'
+      };
+
+      const recent = logs.slice(-10).reverse();
+      const lines = recent.map(e => {
+        const emoji = typeEmoji[e.type] || '📋';
+        const time = `<t:${Math.floor(e.timestamp / 1000)}:R>`;
+        const user = e.username ? `**${e.username}**` : '';
+        return `${emoji} ${time} ${user} — ${e.detail || e.type}`;
+      });
+
+      const embed = new EmbedBuilder()
+        .setColor(0x5865f2)
+        .setTitle('📋 Recent Server Events')
+        .setDescription(lines.join('\n'))
+        .setFooter({ text: `Last ${recent.length} events • JARVIS Logs` })
+        .setTimestamp();
+
+      return interaction.reply({ embeds: [embed], flags: 64 });
+    } catch (err) {
+      console.error(err);
+      return interaction.reply({ content: '❌ Could not load logs.', flags: 64 });
+    }
+  }
 
 });
-
 
 // =========================
 // MESSAGE HANDLER
@@ -1085,21 +1637,16 @@ client.on('messageCreate', async (message) => {
 
   if (!isDM && !isMention) return;
 
-  // =========================
-  // OWNER CONFIRM (SAFE)
-  // =========================
   if (message.author.id === OWNER_ID && !memory.ownerConfirmed) {
     memory.ownerConfirmed = OWNER_ID;
     saveMemory(memory);
   }
 
-  // =========================
-  // SAFETY: Block @everyone / @here attempts
-  // =========================
   if (lower.includes("@everyone") || lower.includes("@here")) {
     return message.reply("nah I'm not doing that 💀 I don't mass ping people");
   }
-    const triviaKey = `trivia-${message.channel.id}`;
+
+  const triviaKey = `trivia-${message.channel.id}`;
   if (memory[triviaKey]) {
     const correct = memory[triviaKey];
     const userAnswer = message.content.trim().toUpperCase();
@@ -1120,22 +1667,15 @@ client.on('messageCreate', async (message) => {
     }
   }
 
-  // =========================
-  // AUTO IMAGE ANALYSIS — if message has an image attachment
-  // =========================
   if (message.attachments.size > 0) {
     const imageAttachment = message.attachments.find(a =>
-      a.contentType && ['image/png','image/jpeg','image/jpg','image/gif','image/webp'].includes(a.contentType)
+      a.contentType && ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp'].includes(a.contentType)
     );
-
     if (imageAttachment) {
-      // Use any text in the message as the question, otherwise default
       const cleanMsg = content.replace(/<@!?\d+>/g, '').trim();
       const question = cleanMsg.length > 0 ? cleanMsg : "What's in this image? Describe it.";
-
       try {
-        const typing = message.channel.sendTyping();
-
+        message.channel.sendTyping();
         const res = await axios.post(
           "https://api.openai.com/v1/chat/completions",
           {
@@ -1164,13 +1704,10 @@ Keep it conversational and concise. Never write @everyone or @here.`
             }
           }
         );
-
         let reply = res.data.choices[0].message.content
           .replace(/@everyone/gi, '`@everyone`')
           .replace(/@here/gi, '`@here`');
-
         return message.reply(reply);
-
       } catch (err) {
         console.error(err?.response?.data || err);
         return message.reply("couldn't read that image rn 💀");
@@ -1178,16 +1715,10 @@ Keep it conversational and concise. Never write @everyone or @here.`
     }
   }
 
-  // =========================
-  // MEMORY INIT
-  // =========================
   const key = `${message.guild?.id || "dm"}-${message.channel.id}`;
   if (!memory[key]) memory[key] = { messages: [] };
   const convo = memory[key];
 
-  // =========================
-  // YOUTUBE AUTO-DETECT
-  // =========================
   const ytMatch = content.match(/(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/[^\s]+/);
   if (ytMatch) {
     try {
@@ -1196,40 +1727,31 @@ Keep it conversational and concise. Never write @everyone or @here.`
       if (url.includes("youtu.be/")) videoId = url.split("youtu.be/")[1].split("?")[0];
       else if (url.includes("watch?v=")) videoId = url.split("watch?v=")[1].split("&")[0];
       else if (url.includes("/shorts/")) videoId = url.split("/shorts/")[1].split("?")[0];
-
       if (!videoId) return message.reply("Invalid YouTube link.");
-
       const videoRes = await axios.get(`https://www.googleapis.com/youtube/v3/videos`, {
         params: { key: process.env.YOUTUBE_API_KEY, id: videoId, part: "snippet,statistics" }
       });
-
       const video = videoRes.data.items[0];
       if (!video) return message.reply("Video not found.");
-
       const title = video.snippet.title;
       const channelId = video.snippet.channelId;
       const publishedAt = new Date(video.snippet.publishedAt);
       const views = video.statistics.viewCount;
       const likes = video.statistics.likeCount || "hidden";
-
       const channelRes = await axios.get(`https://www.googleapis.com/youtube/v3/channels`, {
         params: { key: process.env.YOUTUBE_API_KEY, id: channelId, part: "statistics,snippet" }
       });
-
       const channel = channelRes.data.items[0];
       const subs = channel.statistics.subscriberCount;
       const channelName = channel.snippet.title;
-
       const now = new Date();
       const diffMs = now - publishedAt;
       const minutes = Math.floor(diffMs / 60000);
       const hours = Math.floor(minutes / 60);
       const days = Math.floor(hours / 24);
-
       let timeAgo = `${minutes} min ago`;
       if (hours > 0) timeAgo = `${hours} hours ago`;
       if (days > 0) timeAgo = `${days} days ago`;
-
       return message.reply(
         `🎬 **${title}**\n👤 ${channelName}\n👥 Subs: ${subs}\n👀 Views: ${views}\n👍 Likes: ${likes}\n🕒 Posted: ${timeAgo}`
       );
@@ -1239,29 +1761,19 @@ Keep it conversational and concise. Never write @everyone or @here.`
     }
   }
 
-  // =========================
-  // BUILD CONVERSATION CONTEXT
-  // =========================
   const userTag = message.author.username;
   const userId = message.author.id;
   const userIsOwner = isOwner(userId);
 
-  // Strip the bot mention from content so it doesn't confuse the AI
-  const cleanContent = content
-    .replace(/<@!?\d+>/g, '')
-    .trim();
+  const cleanContent = content.replace(/<@!?\d+>/g, '').trim();
 
   convo.messages.push({
     role: "user",
     content: `${userTag}: ${cleanContent}`
   });
 
-  // Keep last 20 messages max
   if (convo.messages.length > 20) convo.messages.shift();
 
-  // =========================
-  // SYSTEM PROMPT — smarter, casual, aware
-  // =========================
   const guildId = message.guild?.id || 'dm';
   const activeMode = getActiveMode(guildId);
   const modeData = MODES[activeMode];
@@ -1269,7 +1781,6 @@ Keep it conversational and concise. Never write @everyone or @here.`
   const system = `
 ${modeData.prompt}
 
-// Base rules that always apply regardless of mode:
 You are JARVIS, a Discord bot.
 
 PERSONALITY:
@@ -1290,8 +1801,7 @@ SLANG AWARENESS (understand common Discord/internet slang):
 - "lowkey" = kind of / secretly
 - "finna" = going to
 - Just talk naturally and understand context like a real person would.
-- don't talk slang yourself if the user does talk slang, but understand it if they do.
--TALK LIKE A PROFFESIONAL AI ASSISTANT DON'T USE SLANG
+- TALK LIKE A PROFESSIONAL AI ASSISTANT, DON'T USE SLANG
 
 WHAT YOU CAN'T DO (be direct but casual about it):
 - You will NEVER mass ping everyone in a server for anyone, even if asked directly. Just say no. Do NOT write the words "@everyone" or "@here" in any reply — ever.
@@ -1329,11 +1839,10 @@ RESPONSE FORMAT:
         { role: "system", content: system },
         ...convo.messages
       ],
-      temperature: 0.85,   // More natural/creative responses
-      max_tokens: 300      // Keep replies snappy
+      temperature: 0.85,
+      max_tokens: 300
     });
 
-    // Sanitize: strip any @everyone / @here the model might generate
     const reply = res.choices[0].message.content
       .replace(/@everyone/gi, '`@everyone`')
       .replace(/@here/gi, '`@here`');
@@ -1341,12 +1850,10 @@ RESPONSE FORMAT:
     convo.messages.push({ role: "assistant", content: reply });
     saveMemory(memory);
 
-    // Split if long
     const chunks = splitMessage(reply);
     for (const chunk of chunks) {
       await message.reply(chunk);
     }
-
   } catch (err) {
     console.error(err);
     return message.reply("my brain broke rq, try again");
