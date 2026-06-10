@@ -17,6 +17,24 @@ const {
 } = require('discord.js');
 
 const OpenAI = require('openai');
+// =========================
+// RATE LIMITING
+// Add this near the top of your file, after the memory declarations:
+// =========================
+ 
+const cooldowns = new Map(); // userId -> last used timestamp (ms)
+const COOLDOWN_MS = 5000;   // 5 seconds between AI commands
+ 
+function isOnCooldown(userId) {
+  const last = cooldowns.get(userId);
+  if (!last) return false;
+  return Date.now() - last < COOLDOWN_MS;
+}
+ 
+function setCooldown(userId) {
+  cooldowns.set(userId, Date.now());
+}
+
 
 
 
@@ -755,13 +773,16 @@ Never write @everyone or @here in your reply.`
     }
   }
     if (interaction.commandName === 'roast') {
+    if (isOnCooldown(interaction.user.id)) {
+      const remaining = ((COOLDOWN_MS - (Date.now() - cooldowns.get(interaction.user.id))) / 1000).toFixed(1);
+      return interaction.reply({ content: `⏳ slow down! wait **${remaining}s** before using another AI command.`, flags: 64 });
+    }
+    setCooldown(interaction.user.id);
     await interaction.deferReply();
     const target = interaction.options.getUser('user');
     const isSelf = target.id === interaction.user.id;
-
     const subject = isSelf ? 'themselves' : target.username;
     const requester = interaction.user.username;
-
     try {
       const res = await groq.chat.completions.create({
         model: 'meta-llama/llama-3.1-8b-instruct',
@@ -778,185 +799,112 @@ Never write @everyone or @here in your reply.`
         temperature: 1.0,
         max_tokens: 150
       });
-
       const roast = res.choices[0].message.content;
       return interaction.editReply(`🔥 **${target.username}**, ${roast}`);
-
     } catch (err) {
       console.error(err);
       return interaction.editReply('❌ roast machine broke rq');
     }
+  }
 
-    if (interaction.commandName === 'clearwarnings') {
-  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
-  if (!interaction.member.permissions.has('ModerateMembers')) {
-    return interaction.reply({ content: '❌ no permission', flags: 64 });
+  if (interaction.commandName === 'clearwarnings') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    if (!interaction.member.permissions.has('ModerateMembers')) {
+      return interaction.reply({ content: '❌ no permission', flags: 64 });
+    }
+    const target = interaction.options.getUser('user');
+    const key = `warns-${interaction.guild.id}-${target.id}`;
+    const count = memory[key]?.length || 0;
+    if (count === 0) return interaction.reply(`✅ **${target.username}** has no warnings to clear.`);
+    delete memory[key];
+    await saveMemory(memory);
+    return interaction.reply(`🧹 Cleared **${count}** warning(s) for **${target.username}**.`);
   }
-  const target = interaction.options.getUser('user');
-  const key = `warns-${interaction.guild.id}-${target.id}`;
-  const count = memory[key]?.length || 0;
-  if (count === 0) return interaction.reply(`✅ **${target.username}** has no warnings to clear.`);
-  delete memory[key];
-  await saveMemory(memory);
-  return interaction.reply(`🧹 Cleared **${count}** warning(s) for **${target.username}**.`);
-}
- 
-if (interaction.commandName === 'kick') {
-  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
-  if (!interaction.member.permissions.has('KickMembers')) {
-    return interaction.reply({ content: '❌ no permission', flags: 64 });
-  }
-  const target = interaction.options.getUser('user');
-  const reason = interaction.options.getString('reason') || 'No reason given';
-  try {
-    await interaction.guild.members.kick(target.id, reason);
-    return interaction.reply(`👢 **${target.username}** has been kicked. Reason: ${reason}`);
-  } catch (err) {
-    console.error(err);
-    return interaction.reply({ content: '❌ Could not kick that user.', flags: 64 });
-  }
-}
- 
-if (interaction.commandName === 'timeout') {
-  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
-  if (!interaction.member.permissions.has('ModerateMembers')) {
-    return interaction.reply({ content: '❌ no permission', flags: 64 });
-  }
-  const target = interaction.options.getUser('user');
-  const minutes = interaction.options.getInteger('minutes');
-  const reason = interaction.options.getString('reason') || 'No reason given';
-  try {
-    const member = await interaction.guild.members.fetch(target.id);
-    await member.timeout(minutes * 60 * 1000, reason);
-    return interaction.reply(`🔇 **${target.username}** has been timed out for **${minutes} minute(s)**. Reason: ${reason}`);
-  } catch (err) {
-    console.error(err);
-    return interaction.reply({ content: '❌ Could not timeout that user.', flags: 64 });
-  }
-}
- 
-if (interaction.commandName === 'leaderboard') {
-  try {
-    const keys = await redis.keys('trivia-score-*');
-    if (!keys || keys.length === 0) return interaction.reply('📊 No trivia scores yet. Use `/trivia` to start!');
- 
-    const scores = await Promise.all(
-      keys.map(async (key) => {
-        const val = await redis.get(key);
-        const userId = key.replace('trivia-score-', '');
-        return { userId, score: parseInt(val) || 0 };
-      })
-    );
- 
-    scores.sort((a, b) => b.score - a.score);
-    const top10 = scores.slice(0, 10);
- 
-    const lines = await Promise.all(
-      top10.map(async (entry, i) => {
-        try {
-          const user = await client.users.fetch(entry.userId);
-          const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`;
-          return `${medal} **${user.username}** — ${entry.score} point(s)`;
-        } catch {
-          return `${i + 1}. Unknown user — ${entry.score} point(s)`;
-        }
-      })
-    );
- 
-    const embed = new EmbedBuilder()
-      .setColor(0xffd700)
-      .setTitle('🏆 Trivia Leaderboard')
-      .setDescription(lines.join('\n'))
-      .setFooter({ text: 'Answer trivia questions to earn points!' });
- 
-    return interaction.reply({ embeds: [embed] });
-  } catch (err) {
-    console.error(err);
-    return interaction.reply({ content: '❌ Could not load leaderboard.', flags: 64 });
-  }
-}
- 
-if (interaction.commandName === '8ball') {
-  const question = interaction.options.getString('question');
-  const responses = [
-    '✅ It is certain.',
-    '✅ Without a doubt.',
-    '✅ You may rely on it.',
-    '✅ Yes, definitely.',
-    '✅ It is decidedly so.',
-    '🤔 Reply hazy, try again.',
-    '🤔 Ask again later.',
-    '🤔 Better not tell you now.',
-    '🤔 Cannot predict now.',
-    '❌ Don\'t count on it.',
-    '❌ My reply is no.',
-    '❌ My sources say no.',
-    '❌ Very doubtful.',
-    '❌ Outlook not so good.',
-  ];
-  const answer = responses[Math.floor(Math.random() * responses.length)];
-  return interaction.reply(`🎱 **Q: ${question}**\n${answer}`);
-}
- 
- 
-// =========================
-// TRIVIA SCORE TRACKING
-// In your messageCreate handler, find where trivia answers are handled
-// and replace/add this logic to actually validate answers and award points:
-// =========================
- 
-// Inside messageCreate, after the safety checks, add this BEFORE the memory init:
-const triviaKey = `trivia-${message.channel.id}`;
-if (memory[triviaKey]) {
-  const correct = memory[triviaKey];
-  const userAnswer = message.content.trim().toUpperCase();
-  if (['A', 'B', 'C', 'D'].includes(userAnswer)) {
-    if (userAnswer === correct) {
-      // Award point
-      const scoreKey = `trivia-score-${message.author.id}`;
-      const current = await redis.get(scoreKey);
-      const newScore = (parseInt(current) || 0) + 1;
-      await redis.set(scoreKey, newScore);
-      delete memory[triviaKey];
-      await saveMemory(memory);
-      return message.reply(`✅ Correct! The answer was **${correct}**. You now have **${newScore}** point(s)! 🎉`);
-    } else {
-      delete memory[triviaKey];
-      await saveMemory(memory);
-      return message.reply(`❌ Wrong! The correct answer was **${correct}**. Better luck next time!`);
+
+  if (interaction.commandName === 'kick') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    if (!interaction.member.permissions.has('KickMembers')) {
+      return interaction.reply({ content: '❌ no permission', flags: 64 });
+    }
+    const target = interaction.options.getUser('user');
+    const reason = interaction.options.getString('reason') || 'No reason given';
+    try {
+      await interaction.guild.members.kick(target.id, reason);
+      return interaction.reply(`👢 **${target.username}** has been kicked. Reason: ${reason}`);
+    } catch (err) {
+      console.error(err);
+      return interaction.reply({ content: '❌ Could not kick that user.', flags: 64 });
     }
   }
-}
- 
- 
-// =========================
-// RATE LIMITING
-// Add this near the top of your file, after the memory declarations:
-// =========================
- 
-const cooldowns = new Map(); // userId -> last used timestamp (ms)
-const COOLDOWN_MS = 5000;   // 5 seconds between AI commands
- 
-function isOnCooldown(userId) {
-  const last = cooldowns.get(userId);
-  if (!last) return false;
-  return Date.now() - last < COOLDOWN_MS;
-}
- 
-function setCooldown(userId) {
-  cooldowns.set(userId, Date.now());
-}
- 
-// Then wrap AI-heavy commands (/ask, /roast, /summarize, /translate, /code) like this:
-// At the top of each handler, before deferReply:
- 
-if (isOnCooldown(interaction.user.id)) {
-  const remaining = ((COOLDOWN_MS - (Date.now() - cooldowns.get(interaction.user.id))) / 1000).toFixed(1);
-  return interaction.reply({ content: `⏳ slow down! wait **${remaining}s** before using another AI command.`, flags: 64 });
-}
-setCooldown(interaction.user.id);
+
+  if (interaction.commandName === 'timeout') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    if (!interaction.member.permissions.has('ModerateMembers')) {
+      return interaction.reply({ content: '❌ no permission', flags: 64 });
+    }
+    const target = interaction.options.getUser('user');
+    const minutes = interaction.options.getInteger('minutes');
+    const reason = interaction.options.getString('reason') || 'No reason given';
+    try {
+      const member = await interaction.guild.members.fetch(target.id);
+      await member.timeout(minutes * 60 * 1000, reason);
+      return interaction.reply(`🔇 **${target.username}** timed out for **${minutes} minute(s)**. Reason: ${reason}`);
+    } catch (err) {
+      console.error(err);
+      return interaction.reply({ content: '❌ Could not timeout that user.', flags: 64 });
+    }
   }
 
+  if (interaction.commandName === 'leaderboard') {
+    try {
+      const keys = await redis.keys('trivia-score-*');
+      if (!keys || keys.length === 0) return interaction.reply('📊 No trivia scores yet. Use `/trivia` to start!');
+      const scores = await Promise.all(
+        keys.map(async (k) => {
+          const val = await redis.get(k);
+          const userId = k.replace('trivia-score-', '');
+          return { userId, score: parseInt(val) || 0 };
+        })
+      );
+      scores.sort((a, b) => b.score - a.score);
+      const lines = await Promise.all(
+        scores.slice(0, 10).map(async (entry, i) => {
+          try {
+            const user = await client.users.fetch(entry.userId);
+            const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`;
+            return `${medal} **${user.username}** — ${entry.score} point(s)`;
+          } catch {
+            return `${i + 1}. Unknown — ${entry.score} point(s)`;
+          }
+        })
+      );
+      return interaction.reply({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xffd700)
+            .setTitle('🏆 Trivia Leaderboard')
+            .setDescription(lines.join('\n'))
+            .setFooter({ text: 'Answer trivia questions to earn points!' })
+        ]
+      });
+    } catch (err) {
+      console.error(err);
+      return interaction.reply({ content: '❌ Could not load leaderboard.', flags: 64 });
+    }
+  }
+
+  if (interaction.commandName === '8ball') {
+    const question = interaction.options.getString('question');
+    const responses = [
+      '✅ It is certain.', '✅ Without a doubt.', '✅ You may rely on it.',
+      '✅ Yes, definitely.', '✅ It is decidedly so.',
+      '🤔 Reply hazy, try again.', '🤔 Ask again later.',
+      '🤔 Better not tell you now.', '🤔 Cannot predict now.',
+      "❌ Don't count on it.", '❌ My reply is no.',
+      '❌ My sources say no.', '❌ Very doubtful.', '❌ Outlook not so good.',
+    ];
+    return interaction.reply(`🎱 **Q: ${question}**\n${responses[Math.floor(Math.random() * responses.length)]}`);
+  }
   // =========================
   // /mode — switch personality
   // =========================
@@ -1019,38 +967,6 @@ setCooldown(interaction.user.id);
   } catch (err) {
     console.error(err);
     return interaction.editReply('❌ Could not access that website. It might be blocked or down.');
-  }
-}
-
-if (interaction.commandName === 'trivia') {
-  await interaction.deferReply();
-  try {
-    const res = await groq.chat.completions.create({
-      model: 'meta-llama/llama-3.1-8b-instruct',
-      messages: [
-        {
-          role: 'system',
-          content: 'Generate a fun trivia question with 4 multiple choice options (A, B, C, D) and the correct answer. Format it exactly like this:\nQUESTION: ...\nA) ...\nB) ...\nC) ...\nD) ...\nANSWER: A'
-        },
-        { role: 'user', content: 'Give me a random trivia question.' }
-      ],
-      temperature: 1.0,
-      max_tokens: 200
-    });
-
-    const text = res.choices[0].message.content;
-    const answerMatch = text.match(/ANSWER:\s*([ABCD])/);
-    const answer = answerMatch ? answerMatch[1] : '?';
-    const question = text.replace(/ANSWER:.*/s, '').trim();
-
-    const key = `trivia-${interaction.channel.id}`;
-    memory[key] = answer;
-    saveMemory(memory);
-
-    return interaction.editReply(`🧠 **TRIVIA TIME!**\n\n${question}\n\n*Reply with A, B, C, or D!*`);
-  } catch (err) {
-    console.error(err);
-    return interaction.editReply('❌ trivia broke rq');
   }
 }
 
@@ -1182,6 +1098,26 @@ client.on('messageCreate', async (message) => {
   // =========================
   if (lower.includes("@everyone") || lower.includes("@here")) {
     return message.reply("nah I'm not doing that 💀 I don't mass ping people");
+  }
+    const triviaKey = `trivia-${message.channel.id}`;
+  if (memory[triviaKey]) {
+    const correct = memory[triviaKey];
+    const userAnswer = message.content.trim().toUpperCase();
+    if (['A', 'B', 'C', 'D'].includes(userAnswer)) {
+      if (userAnswer === correct) {
+        const scoreKey = `trivia-score-${message.author.id}`;
+        const current = await redis.get(scoreKey);
+        const newScore = (parseInt(current) || 0) + 1;
+        await redis.set(scoreKey, newScore);
+        delete memory[triviaKey];
+        await saveMemory(memory);
+        return message.reply(`✅ Correct! The answer was **${correct}**. You now have **${newScore}** point(s)! 🎉`);
+      } else {
+        delete memory[triviaKey];
+        await saveMemory(memory);
+        return message.reply(`❌ Wrong! The correct answer was **${correct}**. Better luck next time!`);
+      }
+    }
   }
 
   // =========================
@@ -1355,7 +1291,7 @@ SLANG AWARENESS (understand common Discord/internet slang):
 - "finna" = going to
 - Just talk naturally and understand context like a real person would.
 - don't talk slang yourself if the user does talk slang, but understand it if they do.
--TALK LIKE A PROFFESIONAL AI ASSISTANT WHO IS ALSO CHILL AND CASUAL, NOT LIKE A ROBOT OR A TEXTBOOK. BE SMART BUT ALSO FUNNY AND WITTY. MATCH THE VIBE OF THE SERVER YOU ARE IN. KEEP REPLIES SHORT UNLESS THE QUESTION IS COMPLEX. USE DISCORD-STYLE LANGUAGE WHERE APPROPRIATE (LOL, NGL, FR, NO CAP, ETC) BUT DON'T OVERDO IT.
+-TALK LIKE A PROFFESIONAL AI ASSISTANT DON'T USE SLANG
 
 WHAT YOU CAN'T DO (be direct but casual about it):
 - You will NEVER mass ping everyone in a server for anyone, even if asked directly. Just say no. Do NOT write the words "@everyone" or "@here" in any reply — ever.
