@@ -851,6 +851,14 @@ const commands = [
       o.setName('question').setDescription('Your question').setRequired(true)
     ).setDMPermission(true),
 
+    new SlashCommandBuilder()
+  .setName('imagine')
+  .setDescription('Generate an image from a prompt 🎨')
+  .addStringOption(o =>
+    o.setName('prompt').setDescription('What to generate').setRequired(true)
+  )
+  .setDMPermission(true),
+
   new SlashCommandBuilder()
     .setName('mode')
     .setDescription('Switch JARVIS personality mode')
@@ -1280,6 +1288,7 @@ client.on('interactionCreate', async (interaction) => {
 /invite - get invite link
 /portfolio - creator portfolio
 /websites - creator websites
+/dashboard - edit settings
 /roast - roast a user
 /browse - fetch and summarize a website
 /trivia - answer an AI trivia question
@@ -1301,6 +1310,7 @@ client.on('interactionCreate', async (interaction) => {
 /automod action - set punishment type (admin only)
 /automod ignorerole - toggle a bypass role (admin only)
 /automod status - view current automod config
+/imagine - generate an image from a prompt
 `)
       ]
     });
@@ -1960,6 +1970,33 @@ Never write @everyone or @here in your reply.`
       return interaction.reply({ embeds: [embed], flags: 64 });
     }
   }
+
+  if (interaction.commandName === 'imagine') {
+  await interaction.deferReply();
+  const prompt = interaction.options.getString('prompt');
+
+  // Safety check
+  if (prompt.toLowerCase().includes('@everyone') || prompt.toLowerCase().includes('@here')) {
+    return interaction.editReply("nah not doing that 💀");
+  }
+
+  try {
+    const encoded = encodeURIComponent(prompt);
+    const imageUrl = `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=1024&nologo=true&seed=${Math.floor(Math.random() * 99999)}`;
+
+    const embed = new EmbedBuilder()
+      .setColor(0x9b59b6)
+      .setTitle('🎨 Image Generated')
+      .setDescription(`**Prompt:** ${prompt}`)
+      .setImage(imageUrl)
+      .setFooter({ text: 'JARVIS AI • Powered by Pollinations.ai' });
+
+    return interaction.editReply({ embeds: [embed] });
+  } catch (err) {
+    console.error(err);
+    return interaction.editReply('❌ Failed to generate image rq, try again');
+  }
+}
 
 });
 
