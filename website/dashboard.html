@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JARVIS Dashboard</title>
+<style>
+  :root {
+    --bg: #0a0c10;
+    --surface: #111318;
+    --surface2: #181c23;
+    --border: rgba(0,200,255,0.12);
+    --border-active: rgba(0,200,255,0.35);
+    --accent: #00c8ff;
+    --accent-dim: rgba(0,200,255,0.08);
+    --text: #e8edf5;
+    --text-muted: #6b7585;
+    --text-sub: #9aa3b0;
+    --danger: #ff4d4d;
+    --danger-dim: rgba(255,77,77,0.1);
+    --success: #22c55e;
+    --success-dim: rgba(34,197,94,0.1);
+    --warn: #f59e0b;
+    --warn-dim: rgba(245,158,11,0.1);
+    --radius: 10px;
+    --radius-sm: 6px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Inter','Segoe UI',system-ui,sans-serif; font-size: 14px; min-height: 100vh; }
+
+  .topbar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 0 28px; height: 60px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    position: sticky; top: 0; z-index: 100;
+  }
+  .topbar-logo { display:flex; align-items:center; gap:10px; font-size:17px; font-weight:700; letter-spacing:.04em; color:var(--accent); }
+  .topbar-logo svg { width:28px; height:28px; }
+  .topbar-status { margin-left:auto; display:flex; align-items:center; gap:7px; font-size:12px; color:var(--success); }
+  .dot { width:7px; height:7px; border-radius:50%; background:var(--success); animation:pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+  .save-btn { margin-left:16px; padding:7px 18px; background:var(--accent); color:#000; border:none; border-radius:var(--radius-sm); font-size:13px; font-weight:700; cursor:pointer; transition:opacity .15s; }
+  .save-btn:hover { opacity:.85; }
+
+  .layout { display:grid; grid-template-columns:220px 1fr; min-height:calc(100vh - 60px); }
+  .sidebar { border-right:1px solid var(--border); padding:20px 0; background:var(--surface); }
+  .nav-section { padding:6px 16px 4px; font-size:10px; font-weight:700; letter-spacing:.1em; color:var(--text-muted); text-transform:uppercase; margin-top:8px; }
+  .nav-item { display:flex; align-items:center; gap:10px; padding:9px 20px; cursor:pointer; color:var(--text-sub); border-left:2px solid transparent; transition:all .12s; user-select:none; }
+  .nav-item:hover { color:var(--text); background:var(--accent-dim); }
+  .nav-item.active { color:var(--accent); border-left-color:var(--accent); background:var(--accent-dim); }
+  .nav-item svg { width:16px; height:16px; flex-shrink:0; }
+
+  .main { padding:28px 32px; overflow-y:auto; }
+  .page { display:none; }
+  .page.active { display:block; }
+  .page-title { font-size:20px; font-weight:700; margin-bottom:6px; }
+  .page-sub { color:var(--text-muted); margin-bottom:28px; font-size:13px; }
+
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:22px 24px; margin-bottom:20px; }
+  .card-title { font-size:13px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--text-muted); margin-bottom:18px; display:flex; align-items:center; gap:8px; }
+  .card-title svg { width:14px; height:14px; color:var(--accent); }
+
+  label { display:block; font-size:12px; font-weight:600; color:var(--text-sub); margin-bottom:7px; letter-spacing:.04em; text-transform:uppercase; }
+  input[type="text"], select { width:100%; background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius-sm); color:var(--text); padding:9px 13px; font-size:14px; outline:none; transition:border-color .15s; font-family:inherit; }
+  input[type="text"]:focus, select:focus { border-color:var(--accent); }
+  select option { background:#181c23; }
+  .field { margin-bottom:18px; }
+  .field-hint { font-size:11px; color:var(--text-muted); margin-top:5px; }
+
+  .pfp-row { display:flex; align-items:center; gap:20px; margin-bottom:20px; }
+  .pfp-preview { width:72px; height:72px; border-radius:50%; background:var(--surface2); border:2px solid var(--border-active); display:flex; align-items:center; justify-content:center; font-size:26px; font-weight:700; color:var(--accent); overflow:hidden; flex-shrink:0; cursor:pointer; position:relative; }
+  .pfp-preview img { width:100%; height:100%; object-fit:cover; border-radius:50%; }
+  .pfp-overlay { position:absolute; inset:0; border-radius:50%; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; opacity:0; transition:opacity .15s; font-size:11px; font-weight:600; color:#fff; text-align:center; cursor:pointer; padding:6px; }
+  .pfp-preview:hover .pfp-overlay { opacity:1; }
+  .pfp-actions { flex:1; }
+  #pfp-upload { display:none; }
+
+  .btn { display:inline-flex; align-items:center; gap:7px; padding:8px 16px; border-radius:var(--radius-sm); font-size:13px; font-weight:600; cursor:pointer; border:1px solid var(--border-active); background:transparent; color:var(--accent); transition:all .12s; font-family:inherit; }
+  .btn:hover { background:var(--accent-dim); }
+  .btn svg { width:14px; height:14px; }
+  .btn-danger { border-color:rgba(255,77,77,.3); color:var(--danger); }
+  .btn-danger:hover { background:var(--danger-dim); }
+  .btn-success { border-color:rgba(34,197,94,.3); color:var(--success); }
+  .btn-success:hover { background:var(--success-dim); }
+
+  .toggle-row { display:flex; align-items:center; justify-content:space-between; padding:11px 0; border-bottom:1px solid var(--border); }
+  .toggle-row:last-child { border-bottom:none; }
+  .toggle-info { flex:1; }
+  .toggle-name { font-size:13px; font-weight:600; color:var(--text); }
+  .toggle-desc { font-size:11px; color:var(--text-muted); margin-top:2px; }
+  .toggle { position:relative; width:40px; height:22px; flex-shrink:0; }
+  .toggle input { opacity:0; width:0; height:0; }
+  .toggle-slider { position:absolute; cursor:pointer; inset:0; background:var(--surface2); border:1px solid var(--border); border-radius:11px; transition:.2s; }
+  .toggle-slider:before { content:""; position:absolute; height:14px; width:14px; left:3px; bottom:3px; background:var(--text-muted); border-radius:50%; transition:.2s; }
+  .toggle input:checked + .toggle-slider { background:var(--accent-dim); border-color:var(--accent); }
+  .toggle input:checked + .toggle-slider:before { transform:translateX(18px); background:var(--accent); }
+
+  .channel-select-row { display:flex; gap:12px; align-items:flex-end; }
+  .channel-select-row .field { flex:1; margin-bottom:0; }
+  .log-events-grid { display:grid; grid-template-columns:1fr 1fr; gap:0; }
+
+  .divider { height:1px; background:var(--border); margin:20px 0; }
+
+  .toast { position:fixed; bottom:28px; right:28px; background:var(--surface); border:1px solid var(--border-active); color:var(--accent); padding:12px 20px; border-radius:var(--radius); font-size:13px; font-weight:600; z-index:9999; transform:translateY(80px); opacity:0; transition:all .25s; display:flex; align-items:center; gap:8px; }
+  .toast.show { transform:translateY(0); opacity:1; }
+  .toast.error { border-color:rgba(255,77,77,.4); color:var(--danger); }
+
+  .stat-row { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:20px; }
+  .stat-card { background:var(--surface2); border-radius:var(--radius-sm); padding:14px 16px; border:1px solid var(--border); }
+  .stat-num { font-size:22px; font-weight:700; color:var(--accent); }
+  .stat-label { font-size:11px; color:var(--text-muted); margin-top:2px; }
+
+  .mode-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+  .mode-card { background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius-sm); padding:13px 14px; cursor:pointer; transition:all .12s; display:flex; align-items:center; gap:10px; }
+  .mode-card:hover { border-color:var(--border-active); }
+  .mode-card.selected { border-color:var(--accent); background:var(--accent-dim); }
+  .mode-emoji { font-size:18px; }
+  .mode-label { font-size:13px; font-weight:600; color:var(--text); }
+  .mode-sub { font-size:11px; color:var(--text-muted); }
+
+  .cmd-box { background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius-sm); padding:11px 14px; }
+  .cmd-box-label { font-size:11px; color:var(--text-muted); margin-bottom:6px; text-transform:uppercase; letter-spacing:.06em; font-weight:700; }
+
+  @media(max-width:800px) {
+    .layout { grid-template-columns:1fr; }
+    .sidebar { display:none; }
+    .log-events-grid { grid-template-columns:1fr; }
+    .mode-grid { grid-template-columns:repeat(2,1fr); }
+    .stat-row { grid-template-columns:repeat(2,1fr); }
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-logo">
+    <svg viewBox="0 0 28 28" fill="none">
+      <circle cx="14" cy="14" r="13" stroke="#00c8ff" stroke-width="1.5"/>
+      <circle cx="14" cy="14" r="5" fill="#00c8ff" opacity="0.3"/>
+      <circle cx="14" cy="14" r="2.5" fill="#00c8ff"/>
+      <line x1="14" y1="1" x2="14" y2="7" stroke="#00c8ff" stroke-width="1.5"/>
+      <line x1="14" y1="21" x2="14" y2="27" stroke="#00c8ff" stroke-width="1.5"/>
+      <line x1="1" y1="14" x2="7" y2="14" stroke="#00c8ff" stroke-width="1.5"/>
+      <line x1="21" y1="14" x2="27" y2="14" stroke="#00c8ff" stroke-width="1.5"/>
+    </svg>
+    JARVIS
+  </div>
+  <span style="font-size:12px;color:var(--text-muted);margin-left:8px;">Bot Dashboard</span>
+  <div class="topbar-status">
+    <div class="dot"></div>
+    Online
+  </div>
+  <button class="save-btn" onclick="saveAll()">Save Changes</button>
+</div>
+
+<div class="layout">
+  <nav class="sidebar">
+    <div class="nav-section">General</div>
+    <div class="nav-item active" data-page="overview" onclick="nav(this)">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="1" width="6" height="6" rx="1"/><rect x="9" y="1" width="6" height="6" rx="1"/><rect x="1" y="9" width="6" height="6" rx="1"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>
+      Overview
+    </div>
+    <div class="nav-item" data-page="identity" onclick="nav(this)">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="5" r="3"/><path d="M2 14c0-3 2.7-5 6-5s6 2 6 5"/></svg>
+      Bot Identity
+    </div>
+    <div class="nav-section">Moderation</div>
+    <div class="nav-item" data-page="logs" onclick="nav(this)">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 2h10a1 1 0 011 1v10a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z"/><line x1="5" y1="6" x2="11" y2="6"/><line x1="5" y1="9" x2="9" y2="9"/></svg>
+      Server Logs
+    </div>
+    <div class="nav-item" data-page="personality" onclick="nav(this)">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 2C4.7 2 2 4.7 2 8s2.7 6 6 6 6-2.7 6-6-2.7-6-6-6z"/><path d="M5.5 9.5s.7 1.5 2.5 1.5 2.5-1.5 2.5-1.5"/><circle cx="5.5" cy="6.5" r=".75" fill="currentColor"/><circle cx="10.5" cy="6.5" r=".75" fill="currentColor"/></svg>
+      Personality
+    </div>
+    <div class="nav-section">Moderation</div>
+    <div class="nav-item" data-page="automod" onclick="nav(this)">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1l6 3v5c0 3-2.5 5.5-6 7C2.5 14.5 0 12 0 9V4z"/></svg>
+      Auto Moderation
+    </div>
+  </nav>
+
+  <main class="main">
+
+    <!-- OVERVIEW -->
+    <div class="page active" id="page-overview">
+      <div class="page-title">Overview</div>
+      <div class="page-sub">JARVIS is online and running.</div>
+      <div class="stat-row">
+        <div class="stat-card">
+          <div class="stat-num" id="stat-mode">Normal</div>
+          <div class="stat-label">Current mode</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-num" id="stat-logs">Off</div>
+          <div class="stat-label">Server logging</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-num" id="stat-automod">Off</div>
+          <div class="stat-label">Auto moderation</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="6"/><line x1="7" y1="4" x2="7" y2="7"/><line x1="7" y1="7" x2="9" y2="9"/></svg>
+          Quick actions
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <button class="btn" onclick="nav(document.querySelector('[data-page=identity]'))">
+            <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="4" r="2.5"/><path d="M2 13c0-2.8 2.2-4.5 5-4.5s5 1.7 5 4.5"/></svg>
+            Bot identity
+          </button>
+          <button class="btn" onclick="nav(document.querySelector('[data-page=logs]'))">
+            <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="2" width="12" height="10" rx="1"/><line x1="4" y1="5.5" x2="10" y2="5.5"/><line x1="4" y1="8" x2="8" y2="8"/></svg>
+            Configure logging
+          </button>
+          <button class="btn" onclick="nav(document.querySelector('[data-page=personality]'))">
+            <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="5.5"/><path d="M4.5 8.5s.6 1.5 2.5 1.5 2.5-1.5 2.5-1.5"/></svg>
+            Switch personality
+          </button>
+          <button class="btn" onclick="nav(document.querySelector('[data-page=automod]'))">
+            <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 1l5.5 2.5v4.5C12.5 11 10 13 7 14 4 13 1.5 11 1.5 8V3.5z"/></svg>
+            Auto moderation
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- BOT IDENTITY -->
+    <div class="page" id="page-identity">
+      <div class="page-title">Bot Identity</div>
+      <div class="page-sub">Change JARVIS's display name and avatar on Discord.</div>
+      <div class="card">
+        <div class="card-title">
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="4" r="2.5"/><path d="M2 13c0-2.8 2.2-4.5 5-4.5s5 1.7 5 4.5"/></svg>
+          Avatar
+        </div>
+        <div class="pfp-row">
+          <div class="pfp-preview" id="pfp-circle" onclick="document.getElementById('pfp-upload').click()">
+            <span id="pfp-initials">J</span>
+            <div class="pfp-overlay">Change photo</div>
+          </div>
+          <div class="pfp-actions">
+            <div style="font-size:13px;color:var(--text-sub);margin-bottom:10px;">Upload a square PNG/JPG. Discord crops it to a circle. Max 8 MB.</div>
+            <div style="display:flex;gap:8px;">
+              <button class="btn" onclick="document.getElementById('pfp-upload').click()">
+                <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 1v8M4 4l3-3 3 3"/><path d="M2 11h10"/></svg>
+                Upload image
+              </button>
+              <button class="btn btn-danger" id="clear-pfp" style="display:none" onclick="clearPfp()">Remove</button>
+            </div>
+          </div>
+        </div>
+        <input type="file" id="pfp-upload" accept="image/*" onchange="handlePfp(this)">
+        <div class="divider"></div>
+        <div class="field">
+          <label>Bot username</label>
+          <input type="text" id="bot-name" placeholder="JARVIS" maxlength="32" oninput="markDirty(); updateIdentityCode();">
+          <div class="field-hint">2–32 characters. Cannot contain "Discord" or special characters.</div>
+        </div>
+        <div class="cmd-box">
+          <div class="cmd-box-label">Generated bot.js snippet</div>
+          <code style="font-size:12px;color:var(--accent);white-space:pre-wrap;display:block;" id="identity-code">// Fill in the fields above</code>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:14px;">
+          <button class="btn btn-success" onclick="applyIdentity()">
+            <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="2,7 5.5,10.5 12,3.5"/></svg>
+            Apply to bot
+          </button>
+          <button class="btn" onclick="copyCode('identity-code')">
+            <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4" y="4" width="8" height="8" rx="1"/><path d="M2 10V2h8"/></svg>
+            Copy snippet
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- SERVER LOGS -->
+    <div class="page" id="page-logs">
+      <div class="page-title">Server Logs</div>
+      <div class="page-sub">Pick a channel and choose which events JARVIS tracks.</div>
+      <div class="card">
+        <div class="card-title">
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 2h10v2H2z"/><rect x="2" y="5" width="10" height="7" rx="1"/></svg>
+          Log channel
+        </div>
+        <div class="toggle-row" style="border:none;padding:0 0 16px;">
+          <div class="toggle-info">
+            <div class="toggle-name">Enable server logging</div>
+            <div class="toggle-desc">Post events to the selected channel</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="logs-master" onchange="toggleLogsmaster()">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div id="log-channel-section" style="opacity:.4;pointer-events:none;">
+          <div class="channel-select-row">
+            <div class="field">
+              <label>Log channel ID</label>
+              <input type="text" id="log-channel-id" placeholder="e.g. 1234567890123456789" oninput="markDirty(); updateLogCode();">
+            </div>
+            <button class="btn" style="margin-bottom:1px;" onclick="copyCode('log-cmd')">Copy command</button>
+          </div>
+          <div class="field-hint" style="margin-top:-10px;margin-bottom:14px;">Right-click the channel in Discord → Copy Channel ID.</div>
+          <div class="cmd-box">
+            <code style="font-size:12px;color:var(--accent);" id="log-cmd">/setlogchannel channel:#your-channel</code>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 1v6M4 4l3-3 3 3M2 11h10"/></svg>
+          Log event types
+        </div>
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px;">Choose which events get posted to your log channel.</div>
+        <div class="log-events-grid" id="log-events-grid"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="2" width="12" height="10" rx="1"/><line x1="4" y1="6" x2="10" y2="6"/><line x1="4" y1="9" x2="8" y2="9"/></svg>
+          Bulk actions
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="btn" onclick="enableAllLogs()">Enable all</button>
+          <button class="btn btn-danger" onclick="disableAllLogs()">Disable all</button>
+          <button class="btn" onclick="copyLogConfig()">Copy config</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- PERSONALITY -->
+    <div class="page" id="page-personality">
+      <div class="page-title">Personality</div>
+      <div class="page-sub">Set JARVIS's default personality mode for this server.</div>
+      <div class="card">
+        <div class="card-title">
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="5.5"/><path d="M4.5 8.5s.6 1.5 2.5 1.5 2.5-1.5 2.5-1.5"/></svg>
+          Active mode
+        </div>
+        <div class="mode-grid" id="mode-grid"></div>
+        <div style="margin-top:16px;" class="cmd-box">
+          <div class="cmd-box-label">Discord command equivalent</div>
+          <code style="font-size:12px;color:var(--accent);" id="mode-cmd">/mode mode:normal</code>
+        </div>
+      </div>
+    </div>
+
+    <!-- AUTO MODERATION -->
+    <div class="page" id="page-automod">
+      <div class="page-title">Auto Moderation</div>
+      <div class="page-sub">Automatically act on rule-breaking messages.</div>
+
+      <div class="card">
+        <div class="card-title">
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 1l5.5 2.5v4.5C12.5 11 10 13 7 14 4 13 1.5 11 1.5 8V3.5z"/></svg>
+          Filters
+        </div>
+        <div id="automod-toggles">
+          <!-- populated by JS -->
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 1v6M4 4l3-3 3 3M2 11h10"/></svg>
+          Action on trigger
+        </div>
+        <div class="field">
+          <label>Punishment</label>
+          <select id="automod-action" onchange="markDirty(); updateAutomodCode();">
+            <option value="delete">Delete message only</option>
+            <option value="warn">Delete + warn user</option>
+            <option value="timeout">Delete + timeout (10 min)</option>
+            <option value="kick">Delete + kick user</option>
+          </select>
+          <div class="field-hint">Applied when any enabled filter triggers.</div>
+        </div>
+        <div class="field">
+          <label>Ignored roles (role IDs, comma-separated)</label>
+          <input type="text" id="automod-ignore-roles" placeholder="e.g. 1122334455, 9988776655" oninput="markDirty();">
+          <div class="field-hint">Users with these roles bypass auto-mod entirely.</div>
+        </div>
+        <div class="cmd-box">
+          <div class="cmd-box-label">Discord command equivalent</div>
+          <code style="font-size:12px;color:var(--accent);" id="automod-cmd">/automod action:delete</code>
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const LOG_EVENTS = [
+  { key:'join',          label:'Member joined',    desc:'When someone joins',         default:true  },
+  { key:'leave',         label:'Member left',       desc:'Leave or removal',           default:true  },
+  { key:'ban',           label:'Ban',               desc:'With mod + reason',          default:true  },
+  { key:'unban',         label:'Unban',             desc:'Member unbans',              default:true  },
+  { key:'kick',          label:'Kick',              desc:'From /kick command',         default:true  },
+  { key:'timeout',       label:'Timeout',           desc:'From /timeout command',      default:true  },
+  { key:'warn',          label:'Warnings',          desc:'/warn usage',                default:true  },
+  { key:'messageDelete', label:'Message deleted',   desc:'Deleted messages + author',  default:true  },
+  { key:'messageEdit',   label:'Message edited',    desc:'Before and after content',   default:false },
+  { key:'channelCreate', label:'Channel created',   desc:'New channels',               default:false },
+  { key:'channelDelete', label:'Channel deleted',   desc:'Deleted channels',           default:false },
+  { key:'roleCreate',    label:'Role created',      desc:'New role creation',          default:false },
+  { key:'roleDelete',    label:'Role deleted',      desc:'Role deletion',              default:false },
+  { key:'nickChange',    label:'Nickname changes',  desc:'Before and after nickname',  default:false },
+  { key:'voiceJoin',     label:'Voice join',        desc:'Members joining voice',      default:false },
+  { key:'voiceLeave',    label:'Voice leave',       desc:'Members leaving voice',      default:false },
+  { key:'voiceMove',     label:'Voice move',        desc:'Moving between channels',    default:false },
+];
+
+const MODES = [
+  { key:'normal', emoji:'🤖', label:'Normal',  sub:'Chill and smart'     },
+  { key:'roast',  emoji:'🔥', label:'Roast',   sub:'Comedy roast mode'   },
+  { key:'hype',   emoji:'🚀', label:'Hype',    sub:'Hypeman energy'      },
+  { key:'tutor',  emoji:'📚', label:'Tutor',   sub:'Patient teacher'     },
+  { key:'chill',  emoji:'😎', label:'Chill',   sub:'Lowkey and calm'     },
+  { key:'evil',   emoji:'😈', label:'Evil',    sub:'Sarcastic villain'   },
+];
+
+const AUTOMOD_FILTERS = [
+  { key:'invites',  label:'Discord invite links',    desc:'Delete messages containing invite links'    },
+  { key:'spam',     label:'Spam / repeated text',    desc:'Catch copy-paste spam and flooding'         },
+  { key:'mentions', label:'Mass mentions',           desc:'Messages mentioning 5+ users at once'       },
+  { key:'caps',     label:'Excessive caps',          desc:'Messages that are >70% uppercase'           },
+  { key:'links',    label:'All external links',      desc:'Block any non-Discord URLs'                 },
+  { key:'slurs',    label:'Slurs & hate speech',     desc:'Block a built-in list of slurs'             },
+];
+
+let state = {
+  botName: 'JARVIS',
+  pfpDataUrl: null,
+  logsEnabled: false,
+  logChannelId: '',
+  logEvents: {},
+  activeMode: 'normal',
+  automodEnabled: {},
+  automodAction: 'delete',
+};
+
+LOG_EVENTS.forEach(e => { state.logEvents[e.key] = e.default; });
+AUTOMOD_FILTERS.forEach(f => { state.automodEnabled[f.key] = false; });
+
+function init() {
+  buildLogEvents();
+  buildModes();
+  buildAutomod();
+  loadFromStorage();
+  updateIdentityCode();
+}
+
+function buildLogEvents() {
+  const grid = document.getElementById('log-events-grid');
+  grid.innerHTML = LOG_EVENTS.map((e,i) => `
+    <div class="toggle-row" style="padding:10px 0;${i%2===0?'padding-right:20px;':''}">
+      <div class="toggle-info">
+        <div class="toggle-name">${e.label}</div>
+        <div class="toggle-desc">${e.desc}</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="log-${e.key}" ${e.default?'checked':''} onchange="state.logEvents['${e.key}']=this.checked;markDirty();">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+  `).join('');
+}
+
+function buildModes() {
+  const grid = document.getElementById('mode-grid');
+  grid.innerHTML = MODES.map(m => `
+    <div class="mode-card ${m.key===state.activeMode?'selected':''}" onclick="selectMode('${m.key}',this)">
+      <span class="mode-emoji">${m.emoji}</span>
+      <div>
+        <div class="mode-label">${m.label}</div>
+        <div class="mode-sub">${m.sub}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function buildAutomod() {
+  const container = document.getElementById('automod-toggles');
+  container.innerHTML = AUTOMOD_FILTERS.map(f => `
+    <div class="toggle-row">
+      <div class="toggle-info">
+        <div class="toggle-name">${f.label}</div>
+        <div class="toggle-desc">${f.desc}</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="amod-${f.key}" onchange="state.automodEnabled['${f.key}']=this.checked;markDirty();updateAutomodStat();updateAutomodCode();">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+  `).join('');
+}
+
+function nav(el) {
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('page-' + el.dataset.page).classList.add('active');
+}
+
+function markDirty() {}
+
+function handlePfp(input) {
+  const file = input.files[0];
+  if (!file) return;
+  if (file.size > 8*1024*1024) { showToast('Image too large (max 8 MB)', true); return; }
+  const reader = new FileReader();
+  reader.onload = e => {
+    state.pfpDataUrl = e.target.result;
+    const circle = document.getElementById('pfp-circle');
+    const existing = circle.querySelector('img');
+    if (existing) existing.remove();
+    document.getElementById('pfp-initials').style.display = 'none';
+    const img = document.createElement('img');
+    img.src = e.target.result;
+    circle.insertBefore(img, circle.firstChild);
+    document.getElementById('clear-pfp').style.display = 'inline-flex';
+    updateIdentityCode();
+  };
+  reader.readAsDataURL(file);
+}
+
+function clearPfp() {
+  state.pfpDataUrl = null;
+  const circle = document.getElementById('pfp-circle');
+  const img = circle.querySelector('img');
+  if (img) img.remove();
+  document.getElementById('pfp-initials').style.display = '';
+  document.getElementById('clear-pfp').style.display = 'none';
+  document.getElementById('pfp-upload').value = '';
+  updateIdentityCode();
+}
+
+function updateIdentityCode() {
+  const name = document.getElementById('bot-name')?.value || 'JARVIS';
+  let code = `await client.user.setUsername('${name||'JARVIS'}');\n`;
+  if (state.pfpDataUrl) {
+    code += `await client.user.setAvatar('./new-avatar.png');`;
+  } else {
+    code += `// await client.user.setAvatar('./avatar.png');`;
+  }
+  document.getElementById('identity-code').textContent = code;
+}
+
+function updateLogCode() {
+  const id = document.getElementById('log-channel-id').value.trim();
+  document.getElementById('log-cmd').textContent = id
+    ? `/setlogchannel channel:#your-channel  // channel ID: ${id}`
+    : '/setlogchannel channel:#your-channel';
+}
+
+function updateAutomodCode() {
+  const action = document.getElementById('automod-action').value;
+  document.getElementById('automod-cmd').textContent = `/automod action:${action}`;
+}
+
+function updateAutomodStat() {
+  const anyOn = Object.values(state.automodEnabled).some(v => v);
+  document.getElementById('stat-automod').textContent = anyOn ? 'On' : 'Off';
+}
+
+function toggleLogsmaster() {
+  const on = document.getElementById('logs-master').checked;
+  state.logsEnabled = on;
+  const sec = document.getElementById('log-channel-section');
+  sec.style.opacity = on ? '1' : '0.4';
+  sec.style.pointerEvents = on ? '' : 'none';
+  document.getElementById('stat-logs').textContent = on ? 'On' : 'Off';
+}
+
+function selectMode(key, el) {
+  document.querySelectorAll('.mode-card').forEach(c => c.classList.remove('selected'));
+  el.classList.add('selected');
+  state.activeMode = key;
+  document.getElementById('mode-cmd').textContent = `/mode mode:${key}`;
+  document.getElementById('stat-mode').textContent = key.charAt(0).toUpperCase() + key.slice(1);
+}
+
+function enableAllLogs() {
+  LOG_EVENTS.forEach(e => { document.getElementById('log-'+e.key).checked = true; state.logEvents[e.key] = true; });
+}
+function disableAllLogs() {
+  LOG_EVENTS.forEach(e => { document.getElementById('log-'+e.key).checked = false; state.logEvents[e.key] = false; });
+}
+function copyLogConfig() {
+  const enabled = LOG_EVENTS.filter(e => state.logEvents[e.key]).map(e => e.key);
+  navigator.clipboard.writeText(`// JARVIS log events: ${enabled.join(', ')}\n// Channel: ${state.logChannelId||'not set'}`).then(() => showToast('Config copied'));
+}
+
+function copyCode(id) {
+  navigator.clipboard.writeText(document.getElementById(id).textContent).then(() => showToast('Copied to clipboard'));
+}
+
+function applyIdentity() {
+  const name = document.getElementById('bot-name').value.trim();
+  if (!name) { showToast('Enter a bot username first', true); return; }
+  copyCode('identity-code');
+  showToast('Snippet copied — paste into your bot.js ready event');
+}
+
+function saveAll() {
+  state.botName = document.getElementById('bot-name')?.value || 'JARVIS';
+  state.logChannelId = document.getElementById('log-channel-id')?.value || '';
+  state.automodAction = document.getElementById('automod-action')?.value || 'delete';
+  localStorage.setItem('jarvis-dashboard', JSON.stringify(state));
+  showToast('Settings saved');
+}
+
+function loadFromStorage() {
+  try {
+    const raw = localStorage.getItem('jarvis-dashboard');
+    if (!raw) return;
+    const saved = JSON.parse(raw);
+    if (saved.botName) document.getElementById('bot-name').value = saved.botName;
+    if (saved.logChannelId) { document.getElementById('log-channel-id').value = saved.logChannelId; updateLogCode(); }
+    if (saved.logsEnabled) { document.getElementById('logs-master').checked = true; toggleLogsmaster(); }
+    if (saved.logEvents) {
+      Object.entries(saved.logEvents).forEach(([k,v]) => { const el = document.getElementById('log-'+k); if (el) { el.checked=v; state.logEvents[k]=v; } });
+    }
+    if (saved.activeMode) { state.activeMode = saved.activeMode; buildModes(); document.getElementById('mode-cmd').textContent = `/mode mode:${saved.activeMode}`; document.getElementById('stat-mode').textContent = saved.activeMode.charAt(0).toUpperCase()+saved.activeMode.slice(1); }
+    if (saved.automodEnabled) {
+      Object.entries(saved.automodEnabled).forEach(([k,v]) => { const el = document.getElementById('amod-'+k); if (el) { el.checked=v; state.automodEnabled[k]=v; } });
+      updateAutomodStat();
+    }
+    if (saved.automodAction) { document.getElementById('automod-action').value = saved.automodAction; updateAutomodCode(); }
+  } catch(e) {}
+}
+
+function showToast(msg, error) {
+  const t = document.getElementById('toast');
+  t.textContent = (error ? '✕  ' : '✓  ') + msg;
+  t.className = 'toast show' + (error ? ' error' : '');
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => { t.className = 'toast'; }, 2600);
+}
+
+init();
+</script>
+</body>
+</html>

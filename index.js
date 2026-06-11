@@ -79,9 +79,9 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages,
-    GatewayIntentBits.GuildMembers,        // for join/leave logging
-    GatewayIntentBits.GuildModeration,     // for ban/unban logging
-    GatewayIntentBits.GuildVoiceStates,    // optional: voice join/leave
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildModeration,
+    GatewayIntentBits.GuildVoiceStates,
   ],
   partials: [Partials.Channel, Partials.Message, Partials.GuildMember]
 });
@@ -149,27 +149,18 @@ function getActiveMode(guildId) {
 }
 
 // =========================
-// LOGGING SYSTEM (Dyno-style)
+// LOGGING SYSTEM
 // =========================
-
-/**
- * Get the log channel for a guild (if set).
- * Returns a TextChannel or null.
- */
 async function getLogChannel(guildId) {
   const channelId = memory.logChannels?.[guildId];
   if (!channelId) return null;
   try {
-    const channel = await client.channels.fetch(channelId);
-    return channel;
+    return await client.channels.fetch(channelId);
   } catch {
     return null;
   }
 }
 
-/**
- * Send a log embed to the guild's log channel.
- */
 async function sendLog(guildId, embed) {
   const channel = await getLogChannel(guildId);
   if (!channel) return;
@@ -180,9 +171,6 @@ async function sendLog(guildId, embed) {
   }
 }
 
-/**
- * Push an event into Redis-backed log history (last 200 per guild).
- */
 async function pushLogEvent(guildId, event) {
   try {
     const key = `logs-${guildId}`;
@@ -196,26 +184,26 @@ async function pushLogEvent(guildId, event) {
   }
 }
 
-// Colour palette for log embed types
 const LOG_COLORS = {
-  join:          0x57f287, // green
-  leave:         0xed4245, // red
-  ban:           0xe74c3c, // dark red
-  unban:         0x2ecc71, // green
-  kick:          0xe67e22, // orange
-  timeout:       0xf1c40f, // yellow
-  messageDelete: 0xff6b6b, // salmon
-  messageEdit:   0x3498db, // blue
-  channelCreate: 0x1abc9c, // teal
-  channelDelete: 0xe74c3c, // red
-  roleCreate:    0x9b59b6, // purple
-  roleDelete:    0x8e44ad, // dark purple
-  roleUpdate:    0xa855f7, // violet
-  voiceJoin:     0x57f287, // green
-  voiceLeave:    0xed4245, // red
-  voiceMove:     0x3b82f6, // blue
-  warn:          0xfbbf24, // amber
-  nickChange:    0x60a5fa, // sky
+  join:          0x57f287,
+  leave:         0xed4245,
+  ban:           0xe74c3c,
+  unban:         0x2ecc71,
+  kick:          0xe67e22,
+  timeout:       0xf1c40f,
+  messageDelete: 0xff6b6b,
+  messageEdit:   0x3498db,
+  channelCreate: 0x1abc9c,
+  channelDelete: 0xe74c3c,
+  roleCreate:    0x9b59b6,
+  roleDelete:    0x8e44ad,
+  roleUpdate:    0xa855f7,
+  voiceJoin:     0x57f287,
+  voiceLeave:    0xed4245,
+  voiceMove:     0x3b82f6,
+  warn:          0xfbbf24,
+  nickChange:    0x60a5fa,
+  automod:       0xff4d4d,
 };
 
 // ─── Member Join ──────────────────────────────────────────────
@@ -303,7 +291,7 @@ client.on('messageDelete', async (message) => {
 // ─── Message Edit ─────────────────────────────────────────────
 client.on('messageUpdate', async (oldMsg, newMsg) => {
   if (!newMsg.guild || newMsg.author?.bot) return;
-  if (oldMsg.content === newMsg.content) return; // embed unfurl, ignore
+  if (oldMsg.content === newMsg.content) return;
 
   const event = {
     type: 'messageEdit',
@@ -334,7 +322,7 @@ client.on('guildBanAdd', async (ban) => {
   let moderator = 'Unknown';
   let reason = ban.reason || 'No reason given';
   try {
-    await new Promise(r => setTimeout(r, 1000)); // wait for audit log
+    await new Promise(r => setTimeout(r, 1000));
     const audit = await ban.guild.fetchAuditLogs({ type: AuditLogEvent.MemberBan, limit: 1 });
     const entry = audit.entries.first();
     if (entry && entry.target.id === ban.user.id) {
@@ -413,10 +401,7 @@ client.on('channelCreate', async (channel) => {
     if (entry) creator = entry.executor?.tag || 'Unknown';
   } catch {}
 
-  const event = {
-    type: 'channelCreate',
-    detail: `#${channel.name} created by ${creator}`
-  };
+  const event = { type: 'channelCreate', detail: `#${channel.name} created by ${creator}` };
   await pushLogEvent(channel.guild.id, event);
 
   const embed = new EmbedBuilder()
@@ -445,10 +430,7 @@ client.on('channelDelete', async (channel) => {
     if (entry) deleter = entry.executor?.tag || 'Unknown';
   } catch {}
 
-  const event = {
-    type: 'channelDelete',
-    detail: `#${channel.name} deleted by ${deleter}`
-  };
+  const event = { type: 'channelDelete', detail: `#${channel.name} deleted by ${deleter}` };
   await pushLogEvent(channel.guild.id, event);
 
   const embed = new EmbedBuilder()
@@ -588,17 +570,186 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 });
 
 // =========================
-// PROMPT ENGINE
+// AUTO MODERATION SYSTEM
 // =========================
-function enhancePrompt(prompt) {
-  return `
-Ultra detailed cinematic scene.
-Subject: ${prompt}
-Style: realistic, ultra detailed, 4k, dramatic lighting, sharp focus.
-No text, no watermark, no logo.
-`;
+
+/**
+ * Config stored in memory.automod[guildId]:
+ * {
+ *   enabled: { invites, spam, mentions, caps, links, slurs },
+ *   action: 'delete' | 'warn' | 'timeout' | 'kick',
+ *   ignoreRoles: ['roleId1', ...]
+ * }
+ */
+
+const SLUR_LIST = [
+  'nigger','nigga','faggot','fag','retard','chink','spic','kike','wetback','gook','tranny','dyke'
+];
+
+// Spam tracker: userId -> array of timestamps
+const spamTracker = new Map();
+
+function checkSpam(userId) {
+  const now = Date.now();
+  const times = (spamTracker.get(userId) || []).filter(t => now - t < 5000);
+  times.push(now);
+  spamTracker.set(userId, times);
+  return times.length >= 5; // 5+ messages in 5s = spam
 }
 
+function getAutomodConfig(guildId) {
+  return memory.automod?.[guildId] || { enabled: {}, action: 'delete', ignoreRoles: [] };
+}
+
+async function handleAutomod(message) {
+  if (!message.guild || message.author.bot) return;
+
+  const config = getAutomodConfig(message.guild.id);
+  const enabled = config.enabled || {};
+
+  // Skip if no filters are on
+  if (!Object.values(enabled).some(Boolean)) return;
+
+  // Fetch member for role/permission checks
+  const member = message.member || await message.guild.members.fetch(message.author.id).catch(() => null);
+
+  // Skip admins and Manage Guild permission holders
+  if (member?.permissions.has('ManageGuild')) return;
+
+  // Skip users with ignored roles
+  if (config.ignoreRoles?.length > 0) {
+    const hasIgnoredRole = config.ignoreRoles.some(roleId => member?.roles.cache.has(roleId));
+    if (hasIgnoredRole) return;
+  }
+
+  const content = message.content;
+  let triggered = false;
+  let filterName = '';
+
+  // ── Filter 1: Discord invite links ──────────────────────────
+  if (enabled.invites && /discord\.(gg|com\/invite)\//i.test(content)) {
+    triggered = true;
+    filterName = 'Discord invite links';
+  }
+
+  // ── Filter 2: Spam / repeated text ──────────────────────────
+  if (!triggered && enabled.spam) {
+    if (checkSpam(message.author.id)) {
+      triggered = true;
+      filterName = 'Spam / flooding';
+    } else if (/(.{3,})\1{3,}/.test(content)) {
+      triggered = true;
+      filterName = 'Repeated text';
+    }
+  }
+
+  // ── Filter 3: Mass mentions (5+ users) ──────────────────────
+  if (!triggered && enabled.mentions) {
+    const mentionCount = (content.match(/<@!?\d+>/g) || []).length;
+    if (mentionCount >= 5) {
+      triggered = true;
+      filterName = `Mass mentions (${mentionCount} users)`;
+    }
+  }
+
+  // ── Filter 4: Excessive caps (>70%, min 8 chars) ────────────
+  if (!triggered && enabled.caps && content.length >= 8) {
+    const letters = content.replace(/[^a-zA-Z]/g, '');
+    if (letters.length >= 4) {
+      const upperRatio = letters.replace(/[^A-Z]/g, '').length / letters.length;
+      if (upperRatio > 0.7) {
+        triggered = true;
+        filterName = 'Excessive caps';
+      }
+    }
+  }
+
+  // ── Filter 5: All external links ────────────────────────────
+  if (!triggered && enabled.links && /https?:\/\//i.test(content)) {
+    if (!/discord\.(com|gg)/i.test(content)) {
+      triggered = true;
+      filterName = 'External links';
+    }
+  }
+
+  // ── Filter 6: Slurs & hate speech ───────────────────────────
+  if (!triggered && enabled.slurs) {
+    const found = SLUR_LIST.find(slur => new RegExp(`\\b${slur}\\b`, 'i').test(content));
+    if (found) {
+      triggered = true;
+      filterName = 'Hate speech / slurs';
+    }
+  }
+
+  if (!triggered) return;
+
+  const action = config.action || 'delete';
+
+  // Delete the message first
+  try { await message.delete(); } catch {}
+
+  // Log to server log channel
+  const logEmbed = new EmbedBuilder()
+    .setColor(LOG_COLORS.automod)
+    .setTitle('🛡️ AutoMod Triggered')
+    .addFields(
+      { name: 'User',    value: `<@${message.author.id}> (${message.author.tag})`, inline: true },
+      { name: 'Channel', value: `<#${message.channel.id}>`,                         inline: true },
+      { name: 'Filter',  value: filterName,                                          inline: true },
+      { name: 'Action',  value: action,                                              inline: true },
+      { name: 'Message', value: content.slice(0, 512) || '*[empty]*' }
+    )
+    .setFooter({ text: `JARVIS AutoMod • ${message.guild.name}` })
+    .setTimestamp();
+
+  await pushLogEvent(message.guild.id, {
+    type: 'automod',
+    userId: message.author.id,
+    username: message.author.tag,
+    detail: `[AutoMod] ${filterName} — action: ${action}`
+  });
+  await sendLog(message.guild.id, logEmbed);
+
+  // ── Execute punishment ───────────────────────────────────────
+  if (action === 'delete') {
+    try { await message.author.send(`⚠️ Your message in **${message.guild.name}** was removed.\nReason: ${filterName}`); } catch {}
+    return;
+  }
+
+  if (action === 'warn') {
+    const key = `warns-${message.guild.id}-${message.author.id}`;
+    memory[key] = memory[key] || [];
+    memory[key].push({ reason: `[AutoMod] ${filterName}`, by: 'JARVIS AutoMod', time: Date.now() });
+    saveMemory(memory);
+    try { await message.author.send(`⚠️ You were warned in **${message.guild.name}**.\nReason: ${filterName}\nTotal warnings: **${memory[key].length}**`); } catch {}
+    return;
+  }
+
+  if (action === 'timeout') {
+    try {
+      const m = await message.guild.members.fetch(message.author.id);
+      await m.timeout(10 * 60 * 1000, `[AutoMod] ${filterName}`);
+      try { await message.author.send(`🔇 You were timed out in **${message.guild.name}** for 10 minutes.\nReason: ${filterName}`); } catch {}
+    } catch (err) {
+      console.error('[AutoMod] timeout failed:', err.message);
+    }
+    return;
+  }
+
+  if (action === 'kick') {
+    try {
+      await message.guild.members.kick(message.author.id, `[AutoMod] ${filterName}`);
+      try { await message.author.send(`👢 You were kicked from **${message.guild.name}**.\nReason: ${filterName}`); } catch {}
+    } catch (err) {
+      console.error('[AutoMod] kick failed:', err.message);
+    }
+    return;
+  }
+}
+
+// =========================
+// PROMPT ENGINE
+// =========================
 function splitMessage(text, maxLength = 1900) {
   const chunks = [];
   for (let i = 0; i < text.length; i += maxLength) {
@@ -708,11 +859,11 @@ const commands = [
         .setRequired(true)
         .addChoices(
           { name: 'normal', value: 'normal' },
-          { name: 'roast', value: 'roast' },
-          { name: 'hype', value: 'hype' },
-          { name: 'tutor', value: 'tutor' },
-          { name: 'chill', value: 'chill' },
-          { name: 'evil', value: 'evil' }
+          { name: 'roast',  value: 'roast'  },
+          { name: 'hype',   value: 'hype'   },
+          { name: 'tutor',  value: 'tutor'  },
+          { name: 'chill',  value: 'chill'  },
+          { name: 'evil',   value: 'evil'   }
         )
     ).setDMPermission(true),
 
@@ -796,7 +947,7 @@ const commands = [
     .addStringOption(o => o.setName('question').setDescription('Your yes/no question').setRequired(true))
     .setDMPermission(true),
 
-  // ─── NEW LOGGING COMMANDS ────────────────────────────────────
+  // ─── LOGGING COMMANDS ────────────────────────────────────────
   new SlashCommandBuilder()
     .setName('setlogchannel')
     .setDescription('Set the channel where JARVIS sends server logs')
@@ -813,6 +964,74 @@ const commands = [
   new SlashCommandBuilder()
     .setName('logs')
     .setDescription('View recent server log events (last 10)')
+    .setDMPermission(false),
+
+  // ─── AUTO MODERATION COMMANDS ────────────────────────────────
+  new SlashCommandBuilder()
+    .setName('automod')
+    .setDescription('Configure auto moderation for this server')
+    .addSubcommand(sub =>
+      sub.setName('enable')
+        .setDescription('Enable an automod filter')
+        .addStringOption(o =>
+          o.setName('filter')
+            .setDescription('Which filter to enable')
+            .setRequired(true)
+            .addChoices(
+              { name: 'invites — Discord invite links', value: 'invites' },
+              { name: 'spam — Spam / repeated text',    value: 'spam'    },
+              { name: 'mentions — Mass mentions (5+)',  value: 'mentions' },
+              { name: 'caps — Excessive caps (>70%)',   value: 'caps'    },
+              { name: 'links — All external links',     value: 'links'   },
+              { name: 'slurs — Hate speech / slurs',    value: 'slurs'   },
+              { name: 'all — Enable every filter',      value: 'all'     }
+            )
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('disable')
+        .setDescription('Disable an automod filter')
+        .addStringOption(o =>
+          o.setName('filter')
+            .setDescription('Which filter to disable')
+            .setRequired(true)
+            .addChoices(
+              { name: 'invites', value: 'invites' },
+              { name: 'spam',    value: 'spam'    },
+              { name: 'mentions',value: 'mentions'},
+              { name: 'caps',    value: 'caps'    },
+              { name: 'links',   value: 'links'   },
+              { name: 'slurs',   value: 'slurs'   },
+              { name: 'all — Disable every filter', value: 'all' }
+            )
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('action')
+        .setDescription('Set the punishment when a filter triggers')
+        .addStringOption(o =>
+          o.setName('type')
+            .setDescription('Punishment type')
+            .setRequired(true)
+            .addChoices(
+              { name: 'delete — Delete message only',          value: 'delete'  },
+              { name: 'warn — Delete + warn user',             value: 'warn'    },
+              { name: 'timeout — Delete + timeout (10 min)',   value: 'timeout' },
+              { name: 'kick — Delete + kick user',             value: 'kick'    }
+            )
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('ignorerole')
+        .setDescription('Add or remove a role that bypasses automod')
+        .addRoleOption(o =>
+          o.setName('role').setDescription('Role to toggle').setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub.setName('status')
+        .setDescription('Show current automod config for this server')
+    )
     .setDMPermission(false),
 
 ].map(c => c.toJSON());
@@ -878,6 +1097,7 @@ client.on('interactionCreate', async (interaction) => {
         ratings: memory.ratings,
         feedback: memory.feedback,
         logChannels: memory.logChannels,
+        automod: memory.automod,
       };
       memory = keep;
       await saveMemory(memory);
@@ -1057,8 +1277,8 @@ client.on('interactionCreate', async (interaction) => {
 /browse - fetch and summarize a website
 /trivia - answer an AI trivia question
 /wouldyourather - get a would you rather question
-/warn - warn a user (admin only)
-/warnings - check user warnings (admin only)
+/warn - warn a user (mod only)
+/warnings - check user warnings
 /news - get latest news on a topic
 /define - get definition of a word
 /clearwarnings - clear all warnings for a user (mod only)
@@ -1069,6 +1289,11 @@ client.on('interactionCreate', async (interaction) => {
 /setlogchannel - set the log channel (admin only)
 /disablelogs - disable server logging (admin only)
 /logs - view recent log events
+/automod enable - enable a filter (admin only)
+/automod disable - disable a filter (admin only)
+/automod action - set punishment type (admin only)
+/automod ignorerole - toggle a bypass role (admin only)
+/automod status - view current automod config
 `)
       ]
     });
@@ -1267,7 +1492,6 @@ Never write @everyone or @here in your reply.`
     const reason = interaction.options.getString('reason') || 'No reason given';
     try {
       await interaction.guild.members.kick(target.id, reason);
-      // Log the kick
       const event = {
         type: 'kick',
         userId: target.id,
@@ -1279,9 +1503,9 @@ Never write @everyone or @here in your reply.`
         .setColor(LOG_COLORS.kick)
         .setTitle('👢 Member Kicked')
         .addFields(
-          { name: 'User', value: `${target.tag}`, inline: true },
-          { name: 'Moderator', value: interaction.user.tag, inline: true },
-          { name: 'Reason', value: reason }
+          { name: 'User',      value: `${target.tag}`,          inline: true },
+          { name: 'Moderator', value: interaction.user.tag,     inline: true },
+          { name: 'Reason',    value: reason }
         )
         .setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` })
         .setTimestamp();
@@ -1304,7 +1528,6 @@ Never write @everyone or @here in your reply.`
     try {
       const member = await interaction.guild.members.fetch(target.id);
       await member.timeout(minutes * 60 * 1000, reason);
-      // Log the timeout
       const event = {
         type: 'timeout',
         userId: target.id,
@@ -1316,10 +1539,10 @@ Never write @everyone or @here in your reply.`
         .setColor(LOG_COLORS.timeout)
         .setTitle('🔇 Member Timed Out')
         .addFields(
-          { name: 'User', value: `${target.tag}`, inline: true },
-          { name: 'Duration', value: `${minutes} minute(s)`, inline: true },
-          { name: 'Moderator', value: interaction.user.tag, inline: true },
-          { name: 'Reason', value: reason }
+          { name: 'User',      value: `${target.tag}`,          inline: true },
+          { name: 'Duration',  value: `${minutes} minute(s)`,   inline: true },
+          { name: 'Moderator', value: interaction.user.tag,     inline: true },
+          { name: 'Reason',    value: reason }
         )
         .setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` })
         .setTimestamp();
@@ -1466,7 +1689,6 @@ Never write @everyone or @here in your reply.`
     memory[key] = memory[key] || [];
     memory[key].push({ reason, by: interaction.user.username, time: Date.now() });
     saveMemory(memory);
-    // Log the warn
     const event = {
       type: 'warn',
       userId: target.id,
@@ -1478,17 +1700,15 @@ Never write @everyone or @here in your reply.`
       .setColor(LOG_COLORS.warn)
       .setTitle('⚠️ Member Warned')
       .addFields(
-        { name: 'User', value: `${target.tag}`, inline: true },
-        { name: 'Moderator', value: interaction.user.tag, inline: true },
-        { name: 'Total Warnings', value: `${memory[key].length}`, inline: true },
-        { name: 'Reason', value: reason }
+        { name: 'User',             value: `${target.tag}`,          inline: true },
+        { name: 'Moderator',        value: interaction.user.tag,     inline: true },
+        { name: 'Total Warnings',   value: `${memory[key].length}`,  inline: true },
+        { name: 'Reason',           value: reason }
       )
       .setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` })
       .setTimestamp();
     await sendLog(interaction.guild.id, logEmbed);
-    try {
-      await target.send(`⚠️ You were warned in **${interaction.guild.name}**\nReason: ${reason}`);
-    } catch {}
+    try { await target.send(`⚠️ You were warned in **${interaction.guild.name}**\nReason: ${reason}`); } catch {}
     return interaction.reply(`⚠️ **${target.username}** has been warned. Total warnings: **${memory[key].length}**`);
   }
 
@@ -1559,9 +1779,10 @@ Never write @everyone or @here in your reply.`
       .setColor(0x57f287)
       .setTitle('✅ Log Channel Set')
       .setDescription(`JARVIS will now send server logs to <#${channel.id}>.`)
-      .addFields(
-        { name: 'Events logged', value: 'Member join/leave • Message delete/edit • Bans/unbans • Kicks • Timeouts • Channel create/delete • Role create/delete • Nickname changes • Voice activity • Warnings', }
-      )
+      .addFields({
+        name: 'Events logged',
+        value: 'Member join/leave • Message delete/edit • Bans/unbans • Kicks • Timeouts • Channel create/delete • Role create/delete • Nickname changes • Voice activity • Warnings • AutoMod actions'
+      })
       .setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` })
       .setTimestamp();
 
@@ -1595,7 +1816,7 @@ Never write @everyone or @here in your reply.`
         timeout: '🔇', messageDelete: '🗑️', messageEdit: '✏️',
         channelCreate: '📢', channelDelete: '🗑️', roleCreate: '🎭',
         roleDelete: '🗑️', voiceJoin: '🔊', voiceLeave: '🔇', voiceMove: '🔀',
-        warn: '⚠️', nickChange: '📝'
+        warn: '⚠️', nickChange: '📝', automod: '🛡️'
       };
 
       const recent = logs.slice(-10).reverse();
@@ -1620,6 +1841,119 @@ Never write @everyone or @here in your reply.`
     }
   }
 
+  // =========================
+  // AUTOMOD SLASH COMMANDS
+  // =========================
+
+  if (interaction.commandName === 'automod') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    if (!interaction.member.permissions.has('ManageGuild')) {
+      return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
+    }
+
+    const sub = interaction.options.getSubcommand();
+    memory.automod = memory.automod || {};
+    if (!memory.automod[interaction.guild.id]) {
+      memory.automod[interaction.guild.id] = { enabled: {}, action: 'delete', ignoreRoles: [] };
+    }
+    const cfg = memory.automod[interaction.guild.id];
+
+    const ALL_FILTERS = ['invites', 'spam', 'mentions', 'caps', 'links', 'slurs'];
+
+    // ── /automod enable ──────────────────────────────────────
+    if (sub === 'enable') {
+      const filter = interaction.options.getString('filter');
+      if (filter === 'all') {
+        ALL_FILTERS.forEach(f => { cfg.enabled[f] = true; });
+        await saveMemory(memory);
+        return interaction.reply('🛡️ All automod filters **enabled**.');
+      }
+      cfg.enabled[filter] = true;
+      await saveMemory(memory);
+      return interaction.reply(`🛡️ AutoMod filter **${filter}** is now **enabled**.`);
+    }
+
+    // ── /automod disable ─────────────────────────────────────
+    if (sub === 'disable') {
+      const filter = interaction.options.getString('filter');
+      if (filter === 'all') {
+        ALL_FILTERS.forEach(f => { cfg.enabled[f] = false; });
+        await saveMemory(memory);
+        return interaction.reply('🛡️ All automod filters **disabled**.');
+      }
+      cfg.enabled[filter] = false;
+      await saveMemory(memory);
+      return interaction.reply(`🛡️ AutoMod filter **${filter}** is now **disabled**.`);
+    }
+
+    // ── /automod action ──────────────────────────────────────
+    if (sub === 'action') {
+      const type = interaction.options.getString('type');
+      cfg.action = type;
+      await saveMemory(memory);
+      const labels = {
+        delete: 'Delete message only',
+        warn: 'Delete + warn user',
+        timeout: 'Delete + timeout (10 min)',
+        kick: 'Delete + kick user'
+      };
+      return interaction.reply(`⚙️ AutoMod punishment set to: **${labels[type]}**`);
+    }
+
+    // ── /automod ignorerole ──────────────────────────────────
+    if (sub === 'ignorerole') {
+      const role = interaction.options.getRole('role');
+      cfg.ignoreRoles = cfg.ignoreRoles || [];
+      const idx = cfg.ignoreRoles.indexOf(role.id);
+      if (idx === -1) {
+        cfg.ignoreRoles.push(role.id);
+        await saveMemory(memory);
+        return interaction.reply(`✅ <@&${role.id}> will now **bypass** automod.`);
+      } else {
+        cfg.ignoreRoles.splice(idx, 1);
+        await saveMemory(memory);
+        return interaction.reply(`❌ <@&${role.id}> is no longer bypassing automod.`);
+      }
+    }
+
+    // ── /automod status ──────────────────────────────────────
+    if (sub === 'status') {
+      const filterNames = {
+        invites:  'Discord invite links',
+        spam:     'Spam / repeated text',
+        mentions: 'Mass mentions (5+)',
+        caps:     'Excessive caps (>70%)',
+        links:    'All external links',
+        slurs:    'Hate speech / slurs',
+      };
+      const filterLines = ALL_FILTERS.map(f => {
+        const on = cfg.enabled?.[f];
+        return `${on ? '🟢' : '🔴'} **${filterNames[f]}**`;
+      }).join('\n');
+
+      const ignoreList = (cfg.ignoreRoles || []).map(id => `<@&${id}>`).join(', ') || 'None';
+      const actionLabels = {
+        delete: '🗑️ Delete message only',
+        warn: '⚠️ Delete + warn',
+        timeout: '🔇 Delete + timeout (10 min)',
+        kick: '👢 Delete + kick'
+      };
+
+      const embed = new EmbedBuilder()
+        .setColor(0xff4d4d)
+        .setTitle('🛡️ AutoMod Status')
+        .addFields(
+          { name: 'Filters',        value: filterLines },
+          { name: 'Punishment',     value: actionLabels[cfg.action] || cfg.action },
+          { name: 'Bypass Roles',   value: ignoreList }
+        )
+        .setFooter({ text: `JARVIS AutoMod • ${interaction.guild.name}` })
+        .setTimestamp();
+
+      return interaction.reply({ embeds: [embed], flags: 64 });
+    }
+  }
+
 });
 
 // =========================
@@ -1627,6 +1961,9 @@ Never write @everyone or @here in your reply.`
 // =========================
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
+
+  // ── Run automod on every message first ──────────────────────
+  await handleAutomod(message);
 
   const content = message.content;
   const lower = content.toLowerCase();
@@ -1781,12 +2118,11 @@ Keep it conversational and concise. Never write @everyone or @here.`
   const system = `
 ${modeData.prompt}
 
-You are JARVIS, a Discord bot.
+You are JARVIS From Iron man made by ${OWNER_NAME}, a Discord bot.
 
 PERSONALITY:
 - Talk naturally, not like a robot. Match the vibe of the server.
 - Keep replies SHORT unless someone asks something complex.
-- Use Gen Z / Discord-style language where appropriate (lol, ngl, fr, no cap, etc). Don't overdo it.
 - You can be funny and witty.
 - You do NOT add unnecessary filler or explain yourself too much.
 
@@ -1801,7 +2137,7 @@ SLANG AWARENESS (understand common Discord/internet slang):
 - "lowkey" = kind of / secretly
 - "finna" = going to
 - Just talk naturally and understand context like a real person would.
-- TALK LIKE A PROFESSIONAL AI ASSISTANT, DON'T USE SLANG
+- TALK LIKE A PROFESSIONAL AI ASSISTANT, DON'T USE SLANG THAT'S AN ORDER
 
 WHAT YOU CAN'T DO (be direct but casual about it):
 - You will NEVER mass ping everyone in a server for anyone, even if asked directly. Just say no. Do NOT write the words "@everyone" or "@here" in any reply — ever.
