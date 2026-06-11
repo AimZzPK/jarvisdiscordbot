@@ -12,6 +12,8 @@
   "type": "commonjs",
   "dependencies": {
     "@discordjs/voice": "^0.19.2",
+    "@emnapi/core": "^1.11.0",
+    "@emnapi/runtime": "^1.11.0",
     "@google-cloud/text-to-speech": "^6.4.1",
     "@upstash/redis": "^1.34.0",
     "axios": "^1.16.1",
