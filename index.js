@@ -69,7 +69,7 @@ let memory = {};
 async function loadMemory() {
   try {
     const data = await redis.get('jarvis-memory');
-    memory = data ? JSON.parse(data) : {};
+    memory = data ? (typeof data === 'string' ? JSON.parse(data) : data) : {};
   } catch {
     memory = {};
   }
@@ -189,7 +189,8 @@ async function pushLogEvent(guildId, event) {
   try {
     const key = `logs-${guildId}`;
     const existing = await redis.get(key);
-    const logs = existing ? JSON.parse(existing) : [];
+    // Upstash auto-parses, so check if it's already an array
+    const logs = Array.isArray(existing) ? existing : (existing ? JSON.parse(existing) : []);
     logs.push({ ...event, timestamp: Date.now() });
     if (logs.length > 200) logs.splice(0, logs.length - 200);
     await redis.set(key, JSON.stringify(logs));
@@ -1988,7 +1989,7 @@ Never write @everyone or @here in your reply.`
     try {
       const key = `logs-${interaction.guild.id}`;
       const existing = await redis.get(key);
-      const logs = existing ? JSON.parse(existing) : [];
+      const logs = Array.isArray(existing) ? existing : (existing ? JSON.parse(existing) : []);
       if (logs.length === 0) return interaction.reply({ content: '📭 No log events recorded yet.', flags: 64 });
 
       const typeEmoji = {
