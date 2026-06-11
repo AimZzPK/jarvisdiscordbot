@@ -30,6 +30,7 @@ const {
 const prism = require('prism-media');
 const { execSync } = require('child_process');
 const FormData = require('form-data');
+const processing = new Set();
 
 // =========================
 // RATE LIMITING
@@ -833,7 +834,7 @@ function listenToUser(connection, userId, guildId, member) {
 
     audioStream.pipe(decoder).pipe(fileStream);
 
-    audioStream.on('end', async () => {
+    audioStream.once('close', async () => {
       fileStream.end();
       await new Promise(r => setTimeout(r, 200));
 
@@ -844,10 +845,10 @@ function listenToUser(connection, userId, guildId, member) {
 
       const wavPath = filePath.replace('.pcm', '.wav');
       try {
-        execSync(`ffmpeg -y -f s16le -ar 16000 -ac 1 -i "${filePath}" "${wavPath}"`);
-        fs.unlinkSync(filePath);
+        execSync(`ffmpeg -f s16le -ar 16000 -ac 1 -i "${filePath}" "${wavPath}"`);
+        fs.unlinkSync(filePath); // clean up the .pcm
       } catch (err) {
-        console.error('[Voice] FFmpeg failed:', err.message);
+        console.error('[Voice] FFmpeg conversion failed:', err.message);
         try { fs.unlinkSync(filePath); } catch {}
         return;
       }
