@@ -1,3 +1,4 @@
 .env
 memory.json
 node_modules/
+.vercel

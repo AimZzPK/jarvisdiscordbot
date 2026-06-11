@@ -842,6 +842,7 @@ const commands = [
 
   new SlashCommandBuilder().setName('portfolio').setDescription('Get information about creator.').setDMPermission(true),
   new SlashCommandBuilder().setName('websites').setDescription('Get creator websites.').setDMPermission(true),
+  new SlashCommandBuilder().setName('dashboard').setDescription('Edit my settings').setDMPermission(true),
 
   new SlashCommandBuilder()
     .setName('ask')
@@ -1130,6 +1131,12 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.commandName === 'websites') {
     return interaction.reply({
       content: `🚀 See my Creators Websites here:\n👉 https://widoe-portfolio.vercel.app/\nhttps://jarvisbot-rust.vercel.app/\nhttps://pokedex-bice-zeta-61.vercel.app/`
+    });
+  }
+
+  if (interaction.commandName === 'dashboard') {
+    return interaction.reply({
+      content: `🚀 See my Dashboard here:\n👉 https://jarvisbot-rust.vercel.app/dashboard.html`
     });
   }
 
