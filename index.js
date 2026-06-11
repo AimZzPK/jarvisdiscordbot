@@ -17,6 +17,19 @@ const {
 } = require('discord.js');
 
 const OpenAI = require('openai');
+const {
+  joinVoiceChannel,
+  createAudioPlayer,
+  createAudioResource,
+  AudioPlayerStatus,
+  VoiceConnectionStatus,
+  EndBehaviorType,
+  getVoiceConnection,
+  entersState,
+} = require('@discordjs/voice');
+const prism = require('prism-media');
+const { execSync } = require('child_process');
+const FormData = require('form-data');
 
 // =========================
 // RATE LIMITING
@@ -758,6 +771,145 @@ function splitMessage(text, maxLength = 1900) {
   return chunks;
 }
 
+
+
+// =========================
+// VOICE AI SYSTEM
+// =========================
+const activeListeners = new Map();
+
+async function generateSpeech(text) {
+  try {
+    const encoded = encodeURIComponent(text.slice(0, 200));
+    const url = `https://translate.google.com/translate_tts?ie=UTF-8&tl=en&client=tw-ob&q=${encoded}`;
+    const res = await axios.get(url, {
+      responseType: 'arraybuffer',
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
+    const filePath = path.join(__dirname, `tts-${Date.now()}.mp3`);
+    fs.writeFileSync(filePath, Buffer.from(res.data));
+    return filePath;
+  } catch (err) {
+    console.error('[Voice] TTS failed:', err.message);
+    return null;
+  }
+}
+
+async function playAudioFile(connection, filePath) {
+  return new Promise((resolve) => {
+    const player = createAudioPlayer();
+    const resource = createAudioResource(filePath);
+    connection.subscribe(player);
+    player.play(resource);
+    player.on(AudioPlayerStatus.Idle, () => {
+      try { fs.unlinkSync(filePath); } catch {}
+      resolve();
+    });
+    player.on('error', (err) => {
+      console.error('[Voice] Player error:', err.message);
+      try { fs.unlinkSync(filePath); } catch {}
+      resolve();
+    });
+  });
+}
+
+function listenToUser(connection, userId, guildId, member) {
+  if (activeListeners.get(guildId)?.has(userId)) return;
+  if (!activeListeners.has(guildId)) activeListeners.set(guildId, new Set());
+  activeListeners.get(guildId).add(userId);
+
+  const receiver = connection.receiver;
+
+  receiver.speaking.on('start', (speakingUserId) => {
+    if (speakingUserId !== userId) return;
+
+    const audioStream = receiver.subscribe(userId, {
+      end: { behavior: EndBehaviorType.AfterSilence, duration: 1000 },
+    });
+
+    const decoder = new prism.opus.Decoder({ rate: 16000, channels: 1, frameSize: 960 });
+    const filePath = path.join(__dirname, `voice-${userId}-${Date.now()}.pcm`);
+    const fileStream = fs.createWriteStream(filePath);
+
+    audioStream.pipe(decoder).pipe(fileStream);
+
+    audioStream.on('end', async () => {
+      fileStream.end();
+      await new Promise(r => setTimeout(r, 200));
+
+      try {
+        const stats = fs.statSync(filePath);
+        if (stats.size < 4000) { fs.unlinkSync(filePath); return; }
+      } catch { return; }
+
+      const wavPath = filePath.replace('.pcm', '.wav');
+      try {
+        execSync(`ffmpeg -y -f s16le -ar 16000 -ac 1 -i "${filePath}" "${wavPath}"`);
+        fs.unlinkSync(filePath);
+      } catch (err) {
+        console.error('[Voice] FFmpeg failed:', err.message);
+        try { fs.unlinkSync(filePath); } catch {}
+        return;
+      }
+
+      // Transcribe with Groq Whisper (free)
+      let transcript;
+      try {
+        const form = new FormData();
+        form.append('file', fs.createReadStream(wavPath), { filename: 'audio.wav' });
+        form.append('model', 'whisper-large-v3');
+        const res = await axios.post('https://api.groq.com/openai/v1/audio/transcriptions', form, {
+          headers: {
+            ...form.getHeaders(),
+            Authorization: `Bearer ${process.env.GROQ_API_KEY}`
+          }
+        });
+        transcript = res.data.text?.trim();
+        try { fs.unlinkSync(wavPath); } catch {}
+      } catch (err) {
+        console.error('[Voice] Transcription failed:', err.message);
+        try { fs.unlinkSync(wavPath); } catch {}
+        return;
+      }
+
+      if (!transcript || transcript.length < 2) return;
+      console.log(`[Voice] ${member.user.username}: ${transcript}`);
+
+      // AI response
+      const activeMode = getActiveMode(guildId);
+      const modeData = MODES[activeMode];
+
+      let aiResponse;
+      try {
+        const res = await groq.chat.completions.create({
+          model: 'meta-llama/llama-3.1-8b-instruct',
+          messages: [
+            {
+              role: 'system',
+              content: `${modeData.prompt}
+You are JARVIS in a Discord voice channel. Keep replies SHORT — 1-3 sentences max.
+No markdown, no bullet points, no emojis. Speak naturally out loud.`
+            },
+            { role: 'user', content: `${member.user.username} said: ${transcript}` }
+          ],
+          temperature: 0.85,
+          max_tokens: 150,
+        });
+        aiResponse = res.choices[0].message.content.replace(/[*_`#@]/g, '');
+      } catch (err) {
+        console.error('[Voice] AI failed:', err.message);
+        return;
+      }
+
+      if (!aiResponse) return;
+      console.log(`[Voice] JARVIS: ${aiResponse}`);
+
+      const ttsFile = await generateSpeech(aiResponse);
+      if (ttsFile) await playAudioFile(connection, ttsFile);
+    });
+  });
+}
+
 // =========================
 // SLASH COMMANDS
 // =========================
@@ -1043,7 +1195,15 @@ const commands = [
     )
     .setDMPermission(false),
 
+    new SlashCommandBuilder()
+  .setName('join')
+  .setDescription('Join your voice channel and start listening')
+  .setDMPermission(false),
 
+new SlashCommandBuilder()
+  .setName('leave')
+  .setDescription('Leave the voice channel')
+  .setDMPermission(false),
 
 ].map(c => c.toJSON());
 // =========================
@@ -1998,6 +2158,53 @@ Never write @everyone or @here in your reply.`
     console.error(err);
     return interaction.editReply('❌ Failed to generate image rq, try again');
   }
+}
+
+if (interaction.commandName === 'join') {
+  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+  const member = await interaction.guild.members.fetch(interaction.user.id);
+  const voiceChannel = member.voice.channel;
+  if (!voiceChannel) return interaction.reply({ content: '❌ Join a voice channel first.', flags: 64 });
+  const existing = getVoiceConnection(interaction.guild.id);
+  if (existing) return interaction.reply({ content: '⚠️ Already in a voice channel. Use `/leave` first.', flags: 64 });
+
+  const connection = joinVoiceChannel({
+    channelId: voiceChannel.id,
+    guildId: interaction.guild.id,
+    adapterCreator: interaction.guild.voiceAdapterCreator,
+    selfDeaf: false,
+    selfMute: false,
+  });
+
+  await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
+
+  for (const [, vcMember] of voiceChannel.members) {
+    if (vcMember.user.bot) continue;
+    listenToUser(connection, vcMember.id, interaction.guild.id, vcMember);
+  }
+
+  connection.on(VoiceConnectionStatus.Disconnected, async () => {
+    try {
+      await Promise.race([
+        entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
+        entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
+      ]);
+    } catch {
+      connection.destroy();
+      activeListeners.delete(interaction.guild.id);
+    }
+  });
+
+  return interaction.reply(`🎙️ Joined **${voiceChannel.name}**! Talk to me.`);
+}
+
+if (interaction.commandName === 'leave') {
+  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+  const connection = getVoiceConnection(interaction.guild.id);
+  if (!connection) return interaction.reply({ content: "❌ I'm not in a voice channel.", flags: 64 });
+  connection.destroy();
+  activeListeners.delete(interaction.guild.id);
+  return interaction.reply('👋 Left the voice channel.');
 }
 
 });
