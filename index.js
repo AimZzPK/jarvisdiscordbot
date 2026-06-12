@@ -29,6 +29,7 @@ const {
 } = require('@discordjs/voice');
 const prism = require('prism-media');
 const { execSync } = require('child_process');
+const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 const FormData = require('form-data');
 const processing = new Set();
 
@@ -846,7 +847,7 @@ function listenToUser(connection, userId, guildId, member) {
 
       const wavPath = filePath.replace('.pcm', '.wav');
       try {
-        execSync(`ffmpeg -f s16le -ar 16000 -ac 1 -i "${filePath}" "${wavPath}"`);
+        execSync(`"${ffmpegPath}" -f s16le -ar 16000 -ac 1 -i "${filePath}" "${wavPath}"`);
         fs.unlinkSync(filePath); // clean up the .pcm
       } catch (err) {
         console.error('[Voice] FFmpeg conversion failed:', err.message);
