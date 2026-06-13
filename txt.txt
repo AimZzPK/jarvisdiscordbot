@@ -3,7 +3,7 @@ git commit -m "feat: trivia, wouldyourather, warn, warnings, news, define"
 git push origin master
 
 git add .
-git commit -m "New system prompt"
+git commit -m "New code"
 git push
 
  const guildId = message.guild?.id || 'dm';

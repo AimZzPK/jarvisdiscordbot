@@ -86,6 +86,25 @@ async function saveMemory(data) {
 }
 
 // =========================
+// DASHBOARD CONFIG REFRESH
+// =========================
+const DASHBOARD_KEYS = ['logChannels', 'modes', 'automod'];
+
+async function refreshDashboardConfig() {
+  try {
+    const data = await redis.get('jarvis-memory');
+    const remote = data ? (typeof data === 'string' ? JSON.parse(data) : data) : {};
+    for (const key of DASHBOARD_KEYS) {
+      if (remote[key] !== undefined) {
+        memory[key] = remote[key];
+      }
+    }
+  } catch (err) {
+    console.error('[Dashboard] refresh failed:', err.message);
+  }
+}
+
+// =========================
 // CLIENT
 // =========================
 const client = new Client({
@@ -1235,6 +1254,9 @@ client.once('clientReady', async () => {
   await loadMemory();
   console.log(`ONLINE 🔥 als ${client.user.tag}`);
   await deployCommands();
+
+  // Pick up dashboard config changes every 15s without a restart
+  setInterval(refreshDashboardConfig, 15_000);
 });
 
 // =========================

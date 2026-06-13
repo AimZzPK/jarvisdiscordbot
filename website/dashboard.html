@@ -222,6 +222,16 @@
 </head>
 <body>
 
+  <!-- Add a login gate -->
+<div id="login-screen" style="display:flex; align-items:center; justify-content:center; height:100vh; flex-direction:column; gap:16px;">
+  <h1>JARVIS Dashboard</h1>
+  <a href="/api/auth/login" class="btn">Login with Discord</a>
+</div>
+
+<div id="guild-picker" style="display:none;">
+  <!-- list of servers, populated by JS -->
+</div>
+
  <section id="maintenance-screen">
   <div class="maintenance-content">
     <div class="glow-ring"></div>
@@ -232,6 +242,8 @@
     <div class="loader-bar"></div>
   </div>
 </section>
+
+
 
 <div class="topbar">
   <div class="topbar-logo">
