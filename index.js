@@ -1,6 +1,5 @@
 require('dotenv').config({ path: __dirname + '/.env' });
 
-console.log("GROQ KEY:", process.env.GROQ_API_KEY);
 
 const fs = require('fs');
 const path = require('path');
@@ -618,7 +617,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
  */
 
 const SLUR_LIST = [
-  'nigger','nigga','faggot','fag','retard','chink','spic','kike','wetback','gook','tranny','dyke'
+  'nigger','nigga','faggot','fag','retard','chink','spic','kike','wetback','gook','tranny','dyke', 'fuck', 'bitch'
 ];
 
 // Spam tracker: userId -> array of timestamps
@@ -1964,6 +1963,45 @@ Never write @everyone or @here in your reply.`
       return interaction.editReply(`❌ No definition found for **${word}**.`);
     }
   }
+
+
+  if (interaction.commandName === 'trivia') {
+  await interaction.deferReply();
+  try {
+    const res = await groq.chat.completions.create({
+      model: 'meta-llama/llama-3.1-8b-instruct',
+      messages: [
+        {
+          role: 'system',
+          content: `Generate a multiple choice trivia question with 4 options (A, B, C, D). Format exactly like:
+QUESTION: <question text>
+A) <option>
+B) <option>
+C) <option>
+D) <option>
+ANSWER: <letter>`
+        },
+        { role: 'user', content: 'Give me a trivia question.' }
+      ],
+      temperature: 1.0,
+      max_tokens: 200
+    });
+
+    const text = res.choices[0].message.content;
+    const answerMatch = text.match(/ANSWER:\s*([A-D])/i);
+    const answer = answerMatch ? answerMatch[1].toUpperCase() : 'A';
+    const questionText = text.replace(/ANSWER:\s*[A-D]/i, '').trim();
+
+    const triviaKey = `trivia-${interaction.channelId}`;
+    memory[triviaKey] = answer;
+    await saveMemory(memory);
+
+    return interaction.editReply(`🧠 **Trivia Time!**\n\n${questionText}\n\nReply with A, B, C, or D!`);
+  } catch (err) {
+    console.error(err);
+    return interaction.editReply('❌ Failed to generate trivia question.');
+  }
+}
 
   // =========================
   // LOGGING SLASH COMMANDS
