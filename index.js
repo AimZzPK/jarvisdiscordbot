@@ -1229,6 +1229,32 @@ new SlashCommandBuilder()
   .setDescription('Leave the voice channel')
   .setDMPermission(false),
 
+
+  new SlashCommandBuilder()
+  .setName('ticket')
+  .setDescription('Open a support ticket')
+  .addStringOption(o =>
+    o.setName('reason').setDescription('What do you need help with?').setRequired(true)
+  )
+  .setDMPermission(false),
+
+new SlashCommandBuilder()
+  .setName('closeticket')
+  .setDescription('Close this support ticket')
+  .setDMPermission(false),
+
+new SlashCommandBuilder()
+  .setName('addtoticket')
+  .setDescription('Add a user to this ticket')
+  .addUserOption(o => o.setName('user').setDescription('User to add').setRequired(true))
+  .setDMPermission(false),
+
+new SlashCommandBuilder()
+  .setName('setticketcategory')
+  .setDescription('Set the category where ticket channels are created (admin only)')
+  .addStringOption(o => o.setName('categoryid').setDescription('Category ID').setRequired(true))
+  .setDMPermission(false),
+
 ].map(c => c.toJSON());
 // =========================
 // DEPLOY COMMANDS
@@ -1289,6 +1315,39 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply(`❌ **${interaction.user.username}** picked **${chosen}**, but the correct answer was **${correct}**.`);
     }
   }
+  if (interaction.isButton() && interaction.customId.startsWith('closeticket_')) {
+  if (!interaction.guild) return;
+
+  const isStaff = interaction.member.permissions.has('ManageChannels');
+  const ticketOwnerId = interaction.customId.split('_')[1];
+  const isOwnerOfTicket = ticketOwnerId === interaction.user.id;
+
+  if (!isStaff && !isOwnerOfTicket) {
+    return interaction.reply({ content: '❌ Only staff or the ticket owner can close this.', flags: 64 });
+  }
+
+  await interaction.reply('🔒 Closing ticket in 5 seconds...');
+
+  // Clean up memory ref
+  const ownerEntry = Object.entries(memory).find(
+    ([key, val]) =>
+      key.startsWith(`ticket-${interaction.guild.id}-`) &&
+      val === interaction.channel.id
+  );
+  if (ownerEntry) {
+    delete memory[ownerEntry[0]];
+    await saveMemory(memory);
+  }
+
+  await pushLogEvent(interaction.guild.id, {
+    type: 'ticketClose',
+    userId: interaction.user.id,
+    username: interaction.user.tag,
+    detail: `Closed ticket: ${interaction.channel.name} via button`
+  });
+
+  setTimeout(() => interaction.channel.delete().catch(console.error), 5000);
+}
 
   if (!interaction.isChatInputCommand()) return;
 
@@ -1473,6 +1532,213 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ content: "❌ Failed to load reviews", flags: 64 });
     }
   }
+
+  // ── /setticketcategory ────────────────────────────────────────
+if (interaction.commandName === 'setticketcategory') {
+  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+  if (!interaction.member.permissions.has('ManageGuild')) {
+    return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
+  }
+  const categoryId = interaction.options.getString('categoryid');
+  const category = interaction.guild.channels.cache.get(categoryId);
+  if (!category || category.type !== 4) { // 4 = CategoryChannel
+    return interaction.reply({ content: '❌ Invalid category ID. Right-click a category → Copy ID.', flags: 64 });
+  }
+  memory.ticketCategories = memory.ticketCategories || {};
+  memory.ticketCategories[interaction.guild.id] = categoryId;
+  await saveMemory(memory);
+  return interaction.reply(`✅ Ticket channels will now be created under **${category.name}**.`);
+}
+
+// ── /ticket ───────────────────────────────────────────────────
+if (interaction.commandName === 'ticket') {
+  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+
+  // One open ticket per user per server
+  const existingKey = `ticket-${interaction.guild.id}-${interaction.user.id}`;
+  const existingChannelId = memory[existingKey];
+  if (existingChannelId) {
+    const existing = interaction.guild.channels.cache.get(existingChannelId);
+    if (existing) {
+      return interaction.reply({
+        content: `❌ You already have an open ticket: <#${existingChannelId}>`,
+        flags: 64
+      });
+    }
+    // Channel was deleted manually — clean up stale ref
+    delete memory[existingKey];
+  }
+
+  const reason = interaction.options.getString('reason');
+  const categoryId = memory.ticketCategories?.[interaction.guild.id] || null;
+
+  // Count total tickets this guild has ever made (for ticket number)
+  const countKey = `ticket-count-${interaction.guild.id}`;
+  const currentCount = parseInt(await redis.get(countKey) || '0') + 1;
+  await redis.set(countKey, currentCount);
+
+  try {
+    const channelOptions = {
+      name: `ticket-${currentCount}-${interaction.user.username}`.slice(0, 100),
+      topic: `Support ticket for ${interaction.user.tag} | Reason: ${reason}`,
+      permissionOverwrites: [
+        {
+          id: interaction.guild.id, // @everyone
+          deny: ['ViewChannel']
+        },
+        {
+          id: interaction.user.id,
+          allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory', 'AttachFiles']
+        },
+        {
+          id: client.user.id,
+          allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory', 'ManageChannels']
+        }
+      ]
+    };
+
+    if (categoryId) channelOptions.parent = categoryId;
+
+    const ticketChannel = await interaction.guild.channels.create(channelOptions);
+
+    // Save ticket ref
+    memory[existingKey] = ticketChannel.id;
+    await saveMemory(memory);
+
+    // Opening embed
+    const embed = new EmbedBuilder()
+      .setColor(0x5865f2)
+      .setTitle(`🎫 Ticket #${currentCount}`)
+      .setDescription(`Hey <@${interaction.user.id}>, support is on the way!\n\nDescribe your issue in detail and a staff member will be with you shortly.`)
+      .addFields(
+        { name: '📋 Reason', value: reason },
+        { name: '👤 Opened by', value: `${interaction.user.tag}`, inline: true },
+        { name: '🕒 Opened at', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true }
+      )
+      .setFooter({ text: 'JARVIS Ticket System • Click the button below to close' })
+      .setTimestamp();
+
+    const closeButton = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`closeticket_${interaction.user.id}`)
+        .setLabel('🔒 Close Ticket')
+        .setStyle(ButtonStyle.Danger)
+    );
+
+    await ticketChannel.send({
+      content: `<@${interaction.user.id}>`,
+      embeds: [embed],
+      components: [closeButton]
+    });
+
+    // Log it
+    await pushLogEvent(interaction.guild.id, {
+      type: 'ticketOpen',
+      userId: interaction.user.id,
+      username: interaction.user.tag,
+      detail: `Opened ticket #${currentCount} — ${reason}`
+    });
+
+    const logEmbed = new EmbedBuilder()
+      .setColor(0x5865f2)
+      .setTitle('🎫 Ticket Opened')
+      .addFields(
+        { name: 'User',    value: `<@${interaction.user.id}> (${interaction.user.tag})`, inline: true },
+        { name: 'Ticket',  value: `<#${ticketChannel.id}>`,                               inline: true },
+        { name: 'Reason',  value: reason }
+      )
+      .setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` })
+      .setTimestamp();
+    await sendLog(interaction.guild.id, logEmbed);
+
+    return interaction.reply({
+      content: `✅ Your ticket has been opened: <#${ticketChannel.id}>`,
+      flags: 64
+    });
+
+  } catch (err) {
+    console.error('[Ticket] create failed:', err);
+    return interaction.reply({ content: '❌ Failed to create ticket channel. Make sure I have **Manage Channels** permission.', flags: 64 });
+  }
+}
+
+// ── /closeticket ──────────────────────────────────────────────
+if (interaction.commandName === 'closeticket') {
+  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+
+  const isStaff = interaction.member.permissions.has('ManageChannels');
+  const isTicketChannel = interaction.channel.name.startsWith('ticket-');
+
+  if (!isTicketChannel) {
+    return interaction.reply({ content: '❌ This command only works inside a ticket channel.', flags: 64 });
+  }
+
+  // Find the owner of this ticket
+  const ownerEntry = Object.entries(memory).find(
+    ([key, val]) =>
+      key.startsWith(`ticket-${interaction.guild.id}-`) &&
+      val === interaction.channel.id
+  );
+
+  const ticketOwnerId = ownerEntry?.[0]?.split('-').pop();
+  const isOwnerOfTicket = ticketOwnerId === interaction.user.id;
+
+  if (!isStaff && !isOwnerOfTicket) {
+    return interaction.reply({ content: '❌ Only staff or the ticket owner can close this.', flags: 64 });
+  }
+
+  await interaction.reply('🔒 Closing ticket in 5 seconds...');
+
+  // Clean up memory
+  if (ownerEntry) {
+    delete memory[ownerEntry[0]];
+    await saveMemory(memory);
+  }
+
+  // Log it
+  await pushLogEvent(interaction.guild.id, {
+    type: 'ticketClose',
+    userId: interaction.user.id,
+    username: interaction.user.tag,
+    detail: `Closed ticket channel: ${interaction.channel.name}`
+  });
+
+  const logEmbed = new EmbedBuilder()
+    .setColor(0xed4245)
+    .setTitle('🔒 Ticket Closed')
+    .addFields(
+      { name: 'Closed by', value: `<@${interaction.user.id}> (${interaction.user.tag})`, inline: true },
+      { name: 'Channel',   value: interaction.channel.name,                               inline: true }
+    )
+    .setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` })
+    .setTimestamp();
+  await sendLog(interaction.guild.id, logEmbed);
+
+  setTimeout(() => interaction.channel.delete().catch(console.error), 5000);
+}
+
+// ── /addtoticket ──────────────────────────────────────────────
+if (interaction.commandName === 'addtoticket') {
+  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+  if (!interaction.channel.name.startsWith('ticket-')) {
+    return interaction.reply({ content: '❌ This command only works inside a ticket channel.', flags: 64 });
+  }
+  if (!interaction.member.permissions.has('ManageChannels')) {
+    return interaction.reply({ content: '❌ Staff only.', flags: 64 });
+  }
+  const target = interaction.options.getUser('user');
+  try {
+    await interaction.channel.permissionOverwrites.create(target.id, {
+      ViewChannel: true,
+      SendMessages: true,
+      ReadMessageHistory: true
+    });
+    return interaction.reply(`✅ Added <@${target.id}> to this ticket.`);
+  } catch (err) {
+    console.error(err);
+    return interaction.reply({ content: '❌ Failed to add user.', flags: 64 });
+  }
+}
 
   if (interaction.commandName === 'help') {
     return interaction.reply({
@@ -2107,7 +2373,7 @@ ANSWER: <letter>`
         timeout: '🔇', messageDelete: '🗑️', messageEdit: '✏️',
         channelCreate: '📢', channelDelete: '🗑️', roleCreate: '🎭',
         roleDelete: '🗑️', voiceJoin: '🔊', voiceLeave: '🔇', voiceMove: '🔀',
-        warn: '⚠️', nickChange: '📝', automod: '🛡️'
+        warn: '⚠️', nickChange: '📝', automod: '🛡️', ticketOpen:'🎫', ticketClose: '🔒'
       };
 
       const recent = logs.slice(-10).reverse();
