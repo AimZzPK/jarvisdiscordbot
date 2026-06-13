@@ -90,7 +90,7 @@ async function saveMemory(data) {
 // =========================
 // DASHBOARD CONFIG REFRESH
 // =========================
-const DASHBOARD_KEYS = ['logChannels', 'modes', 'automod'];
+const DASHBOARD_KEYS = ['logChannels', 'modes', 'automod', 'enabledLogEvents'];
 
 async function refreshDashboardConfig() {
   try {
@@ -205,6 +205,13 @@ async function sendLog(guildId, embed) {
   } catch (err) {
     console.error(`[LOG] Failed to send log to guild ${guildId}:`, err.message);
   }
+}  // <-- sendLog closes HERE
+
+// separate function, outside sendLog
+function isLogEventEnabled(guildId, eventType) {
+  const enabled = memory.enabledLogEvents?.[guildId];
+  if (!enabled) return true;
+  return enabled[eventType] !== false;
 }
 
 async function pushLogEvent(guildId, event) {
@@ -266,7 +273,9 @@ client.on('guildMemberAdd', async (member) => {
     .setFooter({ text: `JARVIS Logs • ${member.guild.name}` })
     .setTimestamp();
 
+  if (isLogEventEnabled(member.guild.id, 'join')) {
   await sendLog(member.guild.id, embed);
+}
 });
 
 // ─── Member Leave ─────────────────────────────────────────────
@@ -296,7 +305,9 @@ client.on('guildMemberRemove', async (member) => {
     .setFooter({ text: `JARVIS Logs • ${member.guild.name}` })
     .setTimestamp();
 
+  if (isLogEventEnabled(member.guild.id, 'leave')) {
   await sendLog(member.guild.id, embed);
+}
 });
 
 // ─── Message Delete ───────────────────────────────────────────
@@ -322,7 +333,9 @@ client.on('messageDelete', async (message) => {
     .setFooter({ text: `JARVIS Logs • ${message.guild.name}` })
     .setTimestamp();
 
+  if (isLogEventEnabled(message.guild.id, 'messageDelete')) {
   await sendLog(message.guild.id, embed);
+}
 });
 
 // ─── Message Edit ─────────────────────────────────────────────
@@ -351,7 +364,9 @@ client.on('messageUpdate', async (oldMsg, newMsg) => {
     .setFooter({ text: `JARVIS Logs • ${newMsg.guild.name}` })
     .setTimestamp();
 
+  if (isLogEventEnabled(newMsg.guild.id, 'messageEdit')) {
   await sendLog(newMsg.guild.id, embed);
+}
 });
 
 // ─── Ban ──────────────────────────────────────────────────────
@@ -389,7 +404,9 @@ client.on('guildBanAdd', async (ban) => {
     .setFooter({ text: `JARVIS Logs • ${ban.guild.name}` })
     .setTimestamp();
 
+  if (isLogEventEnabled(ban.guild.id, 'ban')) {
   await sendLog(ban.guild.id, embed);
+}
 });
 
 // ─── Unban ────────────────────────────────────────────────────
@@ -423,7 +440,9 @@ client.on('guildBanRemove', async (ban) => {
     .setFooter({ text: `JARVIS Logs • ${ban.guild.name}` })
     .setTimestamp();
 
+  if (isLogEventEnabled(ban.guild.id, 'unban')) {
   await sendLog(ban.guild.id, embed);
+}
 });
 
 // ─── Channel Create ───────────────────────────────────────────
@@ -452,7 +471,9 @@ client.on('channelCreate', async (channel) => {
     .setFooter({ text: `JARVIS Logs • ${channel.guild.name}` })
     .setTimestamp();
 
+  if (isLogEventEnabled(channel.guild.id, 'channelCreate')) {
   await sendLog(channel.guild.id, embed);
+}
 });
 
 // ─── Channel Delete ───────────────────────────────────────────
@@ -480,7 +501,9 @@ client.on('channelDelete', async (channel) => {
     .setFooter({ text: `JARVIS Logs • ${channel.guild.name}` })
     .setTimestamp();
 
+  if (isLogEventEnabled(channel.guild.id, 'channelDelete')) {
   await sendLog(channel.guild.id, embed);
+}
 });
 
 // ─── Role Create ──────────────────────────────────────────────
@@ -506,7 +529,9 @@ client.on('roleCreate', async (role) => {
     .setFooter({ text: `JARVIS Logs • ${role.guild.name}` })
     .setTimestamp();
 
+  if (isLogEventEnabled(role.guild.id, 'roleCreate')) {
   await sendLog(role.guild.id, embed);
+}
 });
 
 // ─── Role Delete ──────────────────────────────────────────────
@@ -532,7 +557,9 @@ client.on('roleDelete', async (role) => {
     .setFooter({ text: `JARVIS Logs • ${role.guild.name}` })
     .setTimestamp();
 
+  if (isLogEventEnabled(role.guild.id, 'roleDelete')) {
   await sendLog(role.guild.id, embed);
+}
 });
 
 // ─── Nickname Change ──────────────────────────────────────────
@@ -558,7 +585,9 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
     .setFooter({ text: `JARVIS Logs • ${newMember.guild.name}` })
     .setTimestamp();
 
+  if (isLogEventEnabled(newMember.guild.id, 'nickChange')) {
   await sendLog(newMember.guild.id, embed);
+}
 });
 
 // ─── Voice State ──────────────────────────────────────────────
@@ -603,7 +632,9 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     .setFooter({ text: `JARVIS Logs • ${newState.guild.name}` })
     .setTimestamp();
 
+  if (isLogEventEnabled(newState.guild.id, type)) {
   await sendLog(newState.guild.id, embed);
+}
 });
 
 // =========================
@@ -2006,7 +2037,9 @@ Never write @everyone or @here in your reply.`
         )
         .setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` })
         .setTimestamp();
-      await sendLog(interaction.guild.id, logEmbed);
+      if (isLogEventEnabled(interaction.guild.id, 'kick')) {
+  await sendLog(interaction.guild.id, logEmbed);
+}
       return interaction.reply(`👢 **${target.username}** has been kicked. Reason: ${reason}`);
     } catch (err) {
       console.error(err);
@@ -2031,7 +2064,9 @@ Never write @everyone or @here in your reply.`
         username: target.tag,
         detail: `Timed out ${minutes}m by ${interaction.user.tag} — ${reason}`
       };
-      await pushLogEvent(interaction.guild.id, event);
+      if (isLogEventEnabled(interaction.guild.id, 'timeout')) {
+  await sendLog(interaction.guild.id, logEmbed);
+}
       const logEmbed = new EmbedBuilder()
         .setColor(LOG_COLORS.timeout)
         .setTitle('🔇 Member Timed Out')
@@ -2203,7 +2238,9 @@ Never write @everyone or @here in your reply.`
       )
       .setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` })
       .setTimestamp();
-    await sendLog(interaction.guild.id, logEmbed);
+    if (isLogEventEnabled(interaction.guild.id, 'warn')) {
+  await sendLog(interaction.guild.id, logEmbed);
+}
     try { await target.send(`⚠️ You were warned in **${interaction.guild.name}**\nReason: ${reason}`); } catch {}
     return interaction.reply(`⚠️ **${target.username}** has been warned. Total warnings: **${memory[key].length}**`);
   }
