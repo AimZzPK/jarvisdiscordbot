@@ -12,7 +12,10 @@ const {
   Partials,
   REST,
   Routes,
-  SlashCommandBuilder
+  SlashCommandBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle
 } = require('discord.js');
 
 const OpenAI = require('openai');
@@ -1262,6 +1265,31 @@ client.once('clientReady', async () => {
 // INTERACTIONS
 // =========================
 client.on('interactionCreate', async (interaction) => {
+  // ── Trivia answer buttons ─────────────────────────────────────
+  if (interaction.isButton() && interaction.customId.startsWith('trivia_')) {
+    const triviaKey = `trivia-${interaction.channelId}`;
+    const correct = memory[triviaKey];
+
+    if (!correct) {
+      return interaction.reply({ content: '❌ This trivia question has expired or was already answered.', flags: 64 });
+    }
+
+    const chosen = interaction.customId.split('_')[1];
+    delete memory[triviaKey];
+    await saveMemory(memory);
+
+    if (chosen === correct) {
+      const scoreKey = `trivia-score-${interaction.user.id}`;
+      const current = await redis.get(scoreKey);
+      const newScore = (parseInt(current) || 0) + 1;
+      await redis.set(scoreKey, newScore);
+      await redis.sadd('trivia-players', interaction.user.id);
+      return interaction.reply(`✅ **${interaction.user.username}** got it right! The answer was **${correct}**. Score: **${newScore}** point(s)! 🎉`);
+    } else {
+      return interaction.reply(`❌ **${interaction.user.username}** picked **${chosen}**, but the correct answer was **${correct}**.`);
+    }
+  }
+
   if (!interaction.isChatInputCommand()) return;
 
   if (interaction.commandName === 'ping') {
@@ -1759,12 +1787,11 @@ Never write @everyone or @here in your reply.`
 
   if (interaction.commandName === 'leaderboard') {
     try {
-      const keys = await redis.keys('trivia-score-*');
-      if (!keys || keys.length === 0) return interaction.reply('📊 No trivia scores yet. Use `/trivia` to start!');
+      const playerIds = await redis.smembers('trivia-players');
+      if (!playerIds || playerIds.length === 0) return interaction.reply('📊 No trivia scores yet. Use `/trivia` to start!');
       const scores = await Promise.all(
-        keys.map(async (k) => {
-          const val = await redis.get(k);
-          const userId = k.replace('trivia-score-', '');
+        playerIds.map(async (userId) => {
+          const val = await redis.get(`trivia-score-${userId}`);
           return { userId, score: parseInt(val) || 0 };
         })
       );
@@ -1964,44 +1991,66 @@ Never write @everyone or @here in your reply.`
     }
   }
 
-
   if (interaction.commandName === 'trivia') {
-  await interaction.deferReply();
-  try {
-    const res = await groq.chat.completions.create({
-      model: 'meta-llama/llama-3.1-8b-instruct',
-      messages: [
-        {
-          role: 'system',
-          content: `Generate a multiple choice trivia question with 4 options (A, B, C, D). Format exactly like:
+    await interaction.deferReply();
+    try {
+      const res = await groq.chat.completions.create({
+        model: 'meta-llama/llama-3.1-8b-instruct',
+        messages: [
+          {
+            role: 'system',
+            content: `Generate a multiple choice trivia question with 4 options (A, B, C, D). Format exactly like:
 QUESTION: <question text>
 A) <option>
 B) <option>
 C) <option>
 D) <option>
 ANSWER: <letter>`
-        },
-        { role: 'user', content: 'Give me a trivia question.' }
-      ],
-      temperature: 1.0,
-      max_tokens: 200
-    });
+          },
+          { role: 'user', content: 'Give me a trivia question.' }
+        ],
+        temperature: 1.0,
+        max_tokens: 200
+      });
 
-    const text = res.choices[0].message.content;
-    const answerMatch = text.match(/ANSWER:\s*([A-D])/i);
-    const answer = answerMatch ? answerMatch[1].toUpperCase() : 'A';
-    const questionText = text.replace(/ANSWER:\s*[A-D]/i, '').trim();
+      const text = res.choices[0].message.content;
+      const answerMatch = text.match(/ANSWER:\s*([A-D])/i);
+      const answer = answerMatch ? answerMatch[1].toUpperCase() : 'A';
 
-    const triviaKey = `trivia-${interaction.channelId}`;
-    memory[triviaKey] = answer;
-    await saveMemory(memory);
+      const qMatch = text.match(/QUESTION:\s*([\s\S]*?)\n[A-D]\)/i);
+      const question = qMatch ? qMatch[1].trim() : text.split('\n')[0];
 
-    return interaction.editReply(`🧠 **Trivia Time!**\n\n${questionText}\n\nReply with A, B, C, or D!`);
-  } catch (err) {
-    console.error(err);
-    return interaction.editReply('❌ Failed to generate trivia question.');
+      const options = {};
+      ['A', 'B', 'C', 'D'].forEach(letter => {
+        const m = text.match(new RegExp(`${letter}\\)\\s*(.+)`));
+        options[letter] = m ? m[1].trim() : letter;
+      });
+
+      const triviaKey = `trivia-${interaction.channelId}`;
+      memory[triviaKey] = answer;
+      await saveMemory(memory);
+
+      const row = new ActionRowBuilder().addComponents(
+        ['A', 'B', 'C', 'D'].map(letter =>
+          new ButtonBuilder()
+            .setCustomId(`trivia_${letter}`)
+            .setLabel(`${letter}) ${options[letter]}`.slice(0, 80))
+            .setStyle(ButtonStyle.Primary)
+        )
+      );
+
+      const embed = new EmbedBuilder()
+        .setColor(0x5865f2)
+        .setTitle('🧠 Trivia Time!')
+        .setDescription(question)
+        .setFooter({ text: 'Click a button below to answer!' });
+
+      return interaction.editReply({ embeds: [embed], components: [row] });
+    } catch (err) {
+      console.error(err);
+      return interaction.editReply('❌ Failed to generate trivia question.');
+    }
   }
-}
 
   // =========================
   // LOGGING SLASH COMMANDS
@@ -2297,27 +2346,6 @@ client.on('messageCreate', async (message) => {
 
   if (lower.includes("@everyone") || lower.includes("@here")) {
     return message.reply("nah I'm not doing that 💀 I don't mass ping people");
-  }
-
-  const triviaKey = `trivia-${message.channel.id}`;
-  if (memory[triviaKey]) {
-    const correct = memory[triviaKey];
-    const userAnswer = message.content.trim().toUpperCase();
-    if (['A', 'B', 'C', 'D'].includes(userAnswer)) {
-      if (userAnswer === correct) {
-        const scoreKey = `trivia-score-${message.author.id}`;
-        const current = await redis.get(scoreKey);
-        const newScore = (parseInt(current) || 0) + 1;
-        await redis.set(scoreKey, newScore);
-        delete memory[triviaKey];
-        await saveMemory(memory);
-        return message.reply(`✅ Correct! The answer was **${correct}**. You now have **${newScore}** point(s)! 🎉`);
-      } else {
-        delete memory[triviaKey];
-        await saveMemory(memory);
-        return message.reply(`❌ Wrong! The correct answer was **${correct}**. Better luck next time!`);
-      }
-    }
   }
 
   if (message.attachments.size > 0) {
