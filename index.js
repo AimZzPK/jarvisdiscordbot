@@ -1,6 +1,3 @@
-require('dotenv').config({ path: __dirname + '/.env' });
-
-
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
@@ -78,8 +75,19 @@ async function loadMemory() {
   }
 }
 
+// saveMemory merges dashboard-managed keys from Redis before writing
+// so bot writes never clobber a dashboard save
+const DASHBOARD_KEYS = ['logChannels', 'modes', 'automod', 'enabledLogEvents'];
+
 async function saveMemory(data) {
   try {
+    const fresh = await redis.get('jarvis-memory');
+    const remote = fresh ? (typeof fresh === 'string' ? JSON.parse(fresh) : fresh) : {};
+    for (const key of DASHBOARD_KEYS) {
+      if (remote[key] !== undefined) {
+        data[key] = remote[key];
+      }
+    }
     await redis.set('jarvis-memory', JSON.stringify(data));
     console.log('✅ Memory saved to Redis');
   } catch (err) {
@@ -90,8 +98,6 @@ async function saveMemory(data) {
 // =========================
 // DASHBOARD CONFIG REFRESH
 // =========================
-const DASHBOARD_KEYS = ['logChannels', 'modes', 'automod', 'enabledLogEvents'];
-
 async function refreshDashboardConfig() {
   try {
     const data = await redis.get('jarvis-memory');
@@ -205,9 +211,8 @@ async function sendLog(guildId, embed) {
   } catch (err) {
     console.error(`[LOG] Failed to send log to guild ${guildId}:`, err.message);
   }
-}  // <-- sendLog closes HERE
+}
 
-// separate function, outside sendLog
 function isLogEventEnabled(guildId, eventType) {
   const enabled = memory.enabledLogEvents?.[guildId];
   if (!enabled) return true;
@@ -218,7 +223,6 @@ async function pushLogEvent(guildId, event) {
   try {
     const key = `logs-${guildId}`;
     const existing = await redis.get(key);
-    // Upstash auto-parses, so check if it's already an array
     const logs = Array.isArray(existing) ? existing : (existing ? JSON.parse(existing) : []);
     logs.push({ ...event, timestamp: Date.now() });
     if (logs.length > 200) logs.splice(0, logs.length - 200);
@@ -259,6 +263,7 @@ client.on('guildMemberAdd', async (member) => {
     detail: `Account created: <t:${Math.floor(member.user.createdTimestamp / 1000)}:R>`
   };
   await pushLogEvent(member.guild.id, event);
+  if (!isLogEventEnabled(member.guild.id, 'join')) return;
 
   const embed = new EmbedBuilder()
     .setColor(LOG_COLORS.join)
@@ -273,9 +278,7 @@ client.on('guildMemberAdd', async (member) => {
     .setFooter({ text: `JARVIS Logs • ${member.guild.name}` })
     .setTimestamp();
 
-  if (isLogEventEnabled(member.guild.id, 'join')) {
   await sendLog(member.guild.id, embed);
-}
 });
 
 // ─── Member Leave ─────────────────────────────────────────────
@@ -292,6 +295,7 @@ client.on('guildMemberRemove', async (member) => {
     detail: `Left or was removed`
   };
   await pushLogEvent(member.guild.id, event);
+  if (!isLogEventEnabled(member.guild.id, 'leave')) return;
 
   const embed = new EmbedBuilder()
     .setColor(LOG_COLORS.leave)
@@ -305,9 +309,7 @@ client.on('guildMemberRemove', async (member) => {
     .setFooter({ text: `JARVIS Logs • ${member.guild.name}` })
     .setTimestamp();
 
-  if (isLogEventEnabled(member.guild.id, 'leave')) {
   await sendLog(member.guild.id, embed);
-}
 });
 
 // ─── Message Delete ───────────────────────────────────────────
@@ -321,6 +323,7 @@ client.on('messageDelete', async (message) => {
     detail: message.content?.slice(0, 200) || '[no content]'
   };
   await pushLogEvent(message.guild.id, event);
+  if (!isLogEventEnabled(message.guild.id, 'messageDelete')) return;
 
   const embed = new EmbedBuilder()
     .setColor(LOG_COLORS.messageDelete)
@@ -333,9 +336,7 @@ client.on('messageDelete', async (message) => {
     .setFooter({ text: `JARVIS Logs • ${message.guild.name}` })
     .setTimestamp();
 
-  if (isLogEventEnabled(message.guild.id, 'messageDelete')) {
   await sendLog(message.guild.id, embed);
-}
 });
 
 // ─── Message Edit ─────────────────────────────────────────────
@@ -350,6 +351,7 @@ client.on('messageUpdate', async (oldMsg, newMsg) => {
     detail: `Before: ${oldMsg.content?.slice(0, 100)}`
   };
   await pushLogEvent(newMsg.guild.id, event);
+  if (!isLogEventEnabled(newMsg.guild.id, 'messageEdit')) return;
 
   const embed = new EmbedBuilder()
     .setColor(LOG_COLORS.messageEdit)
@@ -364,9 +366,7 @@ client.on('messageUpdate', async (oldMsg, newMsg) => {
     .setFooter({ text: `JARVIS Logs • ${newMsg.guild.name}` })
     .setTimestamp();
 
-  if (isLogEventEnabled(newMsg.guild.id, 'messageEdit')) {
   await sendLog(newMsg.guild.id, embed);
-}
 });
 
 // ─── Ban ──────────────────────────────────────────────────────
@@ -390,6 +390,7 @@ client.on('guildBanAdd', async (ban) => {
     detail: `Banned by ${moderator} — ${reason}`
   };
   await pushLogEvent(ban.guild.id, event);
+  if (!isLogEventEnabled(ban.guild.id, 'ban')) return;
 
   const embed = new EmbedBuilder()
     .setColor(LOG_COLORS.ban)
@@ -404,9 +405,7 @@ client.on('guildBanAdd', async (ban) => {
     .setFooter({ text: `JARVIS Logs • ${ban.guild.name}` })
     .setTimestamp();
 
-  if (isLogEventEnabled(ban.guild.id, 'ban')) {
   await sendLog(ban.guild.id, embed);
-}
 });
 
 // ─── Unban ────────────────────────────────────────────────────
@@ -428,6 +427,7 @@ client.on('guildBanRemove', async (ban) => {
     detail: `Unbanned by ${moderator}`
   };
   await pushLogEvent(ban.guild.id, event);
+  if (!isLogEventEnabled(ban.guild.id, 'unban')) return;
 
   const embed = new EmbedBuilder()
     .setColor(LOG_COLORS.unban)
@@ -440,9 +440,7 @@ client.on('guildBanRemove', async (ban) => {
     .setFooter({ text: `JARVIS Logs • ${ban.guild.name}` })
     .setTimestamp();
 
-  if (isLogEventEnabled(ban.guild.id, 'unban')) {
   await sendLog(ban.guild.id, embed);
-}
 });
 
 // ─── Channel Create ───────────────────────────────────────────
@@ -459,6 +457,7 @@ client.on('channelCreate', async (channel) => {
 
   const event = { type: 'channelCreate', detail: `#${channel.name} created by ${creator}` };
   await pushLogEvent(channel.guild.id, event);
+  if (!isLogEventEnabled(channel.guild.id, 'channelCreate')) return;
 
   const embed = new EmbedBuilder()
     .setColor(LOG_COLORS.channelCreate)
@@ -471,9 +470,7 @@ client.on('channelCreate', async (channel) => {
     .setFooter({ text: `JARVIS Logs • ${channel.guild.name}` })
     .setTimestamp();
 
-  if (isLogEventEnabled(channel.guild.id, 'channelCreate')) {
   await sendLog(channel.guild.id, embed);
-}
 });
 
 // ─── Channel Delete ───────────────────────────────────────────
@@ -490,6 +487,7 @@ client.on('channelDelete', async (channel) => {
 
   const event = { type: 'channelDelete', detail: `#${channel.name} deleted by ${deleter}` };
   await pushLogEvent(channel.guild.id, event);
+  if (!isLogEventEnabled(channel.guild.id, 'channelDelete')) return;
 
   const embed = new EmbedBuilder()
     .setColor(LOG_COLORS.channelDelete)
@@ -501,9 +499,7 @@ client.on('channelDelete', async (channel) => {
     .setFooter({ text: `JARVIS Logs • ${channel.guild.name}` })
     .setTimestamp();
 
-  if (isLogEventEnabled(channel.guild.id, 'channelDelete')) {
   await sendLog(channel.guild.id, embed);
-}
 });
 
 // ─── Role Create ──────────────────────────────────────────────
@@ -518,6 +514,7 @@ client.on('roleCreate', async (role) => {
 
   const event = { type: 'roleCreate', detail: `@${role.name} created by ${creator}` };
   await pushLogEvent(role.guild.id, event);
+  if (!isLogEventEnabled(role.guild.id, 'roleCreate')) return;
 
   const embed = new EmbedBuilder()
     .setColor(LOG_COLORS.roleCreate)
@@ -529,9 +526,7 @@ client.on('roleCreate', async (role) => {
     .setFooter({ text: `JARVIS Logs • ${role.guild.name}` })
     .setTimestamp();
 
-  if (isLogEventEnabled(role.guild.id, 'roleCreate')) {
   await sendLog(role.guild.id, embed);
-}
 });
 
 // ─── Role Delete ──────────────────────────────────────────────
@@ -546,6 +541,7 @@ client.on('roleDelete', async (role) => {
 
   const event = { type: 'roleDelete', detail: `@${role.name} deleted by ${deleter}` };
   await pushLogEvent(role.guild.id, event);
+  if (!isLogEventEnabled(role.guild.id, 'roleDelete')) return;
 
   const embed = new EmbedBuilder()
     .setColor(LOG_COLORS.roleDelete)
@@ -557,9 +553,7 @@ client.on('roleDelete', async (role) => {
     .setFooter({ text: `JARVIS Logs • ${role.guild.name}` })
     .setTimestamp();
 
-  if (isLogEventEnabled(role.guild.id, 'roleDelete')) {
   await sendLog(role.guild.id, embed);
-}
 });
 
 // ─── Nickname Change ──────────────────────────────────────────
@@ -573,6 +567,7 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
     detail: `${oldMember.nickname || 'none'} → ${newMember.nickname || 'none'}`
   };
   await pushLogEvent(newMember.guild.id, event);
+  if (!isLogEventEnabled(newMember.guild.id, 'nickChange')) return;
 
   const embed = new EmbedBuilder()
     .setColor(LOG_COLORS.nickChange)
@@ -585,9 +580,7 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
     .setFooter({ text: `JARVIS Logs • ${newMember.guild.name}` })
     .setTimestamp();
 
-  if (isLogEventEnabled(newMember.guild.id, 'nickChange')) {
   await sendLog(newMember.guild.id, embed);
-}
 });
 
 // ─── Voice State ──────────────────────────────────────────────
@@ -618,6 +611,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     detail: `${oldState.channel?.name || '—'} → ${newState.channel?.name || '—'}`
   };
   await pushLogEvent(newState.guild.id, event);
+  if (!isLogEventEnabled(newState.guild.id, type)) return;
 
   const embed = new EmbedBuilder()
     .setColor(LOG_COLORS[type])
@@ -632,29 +626,16 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     .setFooter({ text: `JARVIS Logs • ${newState.guild.name}` })
     .setTimestamp();
 
-  if (isLogEventEnabled(newState.guild.id, type)) {
   await sendLog(newState.guild.id, embed);
-}
 });
 
 // =========================
 // AUTO MODERATION SYSTEM
 // =========================
-
-/**
- * Config stored in memory.automod[guildId]:
- * {
- *   enabled: { invites, spam, mentions, caps, links, slurs },
- *   action: 'delete' | 'warn' | 'timeout' | 'kick',
- *   ignoreRoles: ['roleId1', ...]
- * }
- */
-
 const SLUR_LIST = [
   'nigger','nigga','faggot','fag','retard','chink','spic','kike','wetback','gook','tranny','dyke', 'fuck', 'bitch'
 ];
 
-// Spam tracker: userId -> array of timestamps
 const spamTracker = new Map();
 
 function checkSpam(userId) {
@@ -662,7 +643,7 @@ function checkSpam(userId) {
   const times = (spamTracker.get(userId) || []).filter(t => now - t < 5000);
   times.push(now);
   spamTracker.set(userId, times);
-  return times.length >= 5; // 5+ messages in 5s = spam
+  return times.length >= 5;
 }
 
 function getAutomodConfig(guildId) {
@@ -675,16 +656,11 @@ async function handleAutomod(message) {
   const config = getAutomodConfig(message.guild.id);
   const enabled = config.enabled || {};
 
-  // Skip if no filters are on
   if (!Object.values(enabled).some(Boolean)) return;
 
-  // Fetch member for role/permission checks
   const member = message.member || await message.guild.members.fetch(message.author.id).catch(() => null);
-
-  // Skip admins and Manage Guild permission holders
   if (member?.permissions.has('ManageGuild')) return;
 
-  // Skip users with ignored roles
   if (config.ignoreRoles?.length > 0) {
     const hasIgnoredRole = config.ignoreRoles.some(roleId => member?.roles.cache.has(roleId));
     if (hasIgnoredRole) return;
@@ -694,13 +670,11 @@ async function handleAutomod(message) {
   let triggered = false;
   let filterName = '';
 
-  // ── Filter 1: Discord invite links ──────────────────────────
   if (enabled.invites && /discord\.(gg|com\/invite)\//i.test(content)) {
     triggered = true;
     filterName = 'Discord invite links';
   }
 
-  // ── Filter 2: Spam / repeated text ──────────────────────────
   if (!triggered && enabled.spam) {
     if (checkSpam(message.author.id)) {
       triggered = true;
@@ -711,7 +685,6 @@ async function handleAutomod(message) {
     }
   }
 
-  // ── Filter 3: Mass mentions (5+ users) ──────────────────────
   if (!triggered && enabled.mentions) {
     const mentionCount = (content.match(/<@!?\d+>/g) || []).length;
     if (mentionCount >= 5) {
@@ -720,7 +693,6 @@ async function handleAutomod(message) {
     }
   }
 
-  // ── Filter 4: Excessive caps (>70%, min 8 chars) ────────────
   if (!triggered && enabled.caps && content.length >= 8) {
     const letters = content.replace(/[^a-zA-Z]/g, '');
     if (letters.length >= 4) {
@@ -732,7 +704,6 @@ async function handleAutomod(message) {
     }
   }
 
-  // ── Filter 5: All external links ────────────────────────────
   if (!triggered && enabled.links && /https?:\/\//i.test(content)) {
     if (!/discord\.(com|gg)/i.test(content)) {
       triggered = true;
@@ -740,7 +711,6 @@ async function handleAutomod(message) {
     }
   }
 
-  // ── Filter 6: Slurs & hate speech ───────────────────────────
   if (!triggered && enabled.slurs) {
     const found = SLUR_LIST.find(slur => new RegExp(`\\b${slur}\\b`, 'i').test(content));
     if (found) {
@@ -753,10 +723,8 @@ async function handleAutomod(message) {
 
   const action = config.action || 'delete';
 
-  // Delete the message first
   try { await message.delete(); } catch {}
 
-  // Log to server log channel
   const logEmbed = new EmbedBuilder()
     .setColor(LOG_COLORS.automod)
     .setTitle('🛡️ AutoMod Triggered')
@@ -778,7 +746,6 @@ async function handleAutomod(message) {
   });
   await sendLog(message.guild.id, logEmbed);
 
-  // ── Execute punishment ───────────────────────────────────────
   if (action === 'delete') {
     try { await message.author.send(`⚠️ Your message in **${message.guild.name}** was removed.\nReason: ${filterName}`); } catch {}
     return;
@@ -825,8 +792,6 @@ function splitMessage(text, maxLength = 1900) {
   }
   return chunks;
 }
-
-
 
 // =========================
 // VOICE AI SYSTEM
@@ -900,14 +865,13 @@ function listenToUser(connection, userId, guildId, member) {
       const wavPath = filePath.replace('.pcm', '.wav');
       try {
         execSync(`"${ffmpegPath}" -f s16le -ar 16000 -ac 1 -i "${filePath}" "${wavPath}"`);
-        fs.unlinkSync(filePath); // clean up the .pcm
+        fs.unlinkSync(filePath);
       } catch (err) {
         console.error('[Voice] FFmpeg conversion failed:', err.message);
         try { fs.unlinkSync(filePath); } catch {}
         return;
       }
 
-      // Transcribe with Groq Whisper (free)
       let transcript;
       try {
         const form = new FormData();
@@ -930,7 +894,6 @@ function listenToUser(connection, userId, guildId, member) {
       if (!transcript || transcript.length < 2) return;
       console.log(`[Voice] ${member.user.username}: ${transcript}`);
 
-      // AI response
       const activeMode = getActiveMode(guildId);
       const modeData = MODES[activeMode];
 
@@ -971,30 +934,25 @@ No markdown, no bullet points, no emojis. Speak naturally out loud.`
 const commands = [
   new SlashCommandBuilder().setName('ping').setDescription('Check bot latency').setDMPermission(true),
   new SlashCommandBuilder().setName('servers').setDescription('List servers (owner only)').setDMPermission(true),
-
   new SlashCommandBuilder()
     .setName('clearmemory')
     .setDescription('Clear memory (owner only)')
     .addStringOption(opt =>
       opt.setName('target').setDescription('user id or all').setRequired(true)
     ).setDMPermission(true),
-
   new SlashCommandBuilder().setName('invite').setDescription('Get an invite link for this bot').setDMPermission(true),
-
   new SlashCommandBuilder()
     .setName('weather')
     .setDescription('Check weather for a city')
     .addStringOption(opt =>
       opt.setName('city').setDescription('City name').setRequired(false)
     ).setDMPermission(true),
-
   new SlashCommandBuilder()
     .setName('youtube')
     .setDescription('Get YouTube video info + AI summary')
     .addStringOption(opt =>
       opt.setName('url').setDescription('YouTube video URL').setRequired(true)
     ).setDMPermission(true),
-
   new SlashCommandBuilder()
     .setName('feedback')
     .setDescription('Send feedback about the bot')
@@ -1004,68 +962,54 @@ const commands = [
     .addIntegerOption(opt =>
       opt.setName('rating').setDescription('Rate the bot (1-5 stars)').setRequired(true).setMinValue(1).setMaxValue(5)
     ).setDMPermission(true),
-
   new SlashCommandBuilder().setName('reviews').setDescription('Show bot reviews and rating stats').setDMPermission(true),
   new SlashCommandBuilder().setName('help').setDescription('Show all commands').setDMPermission(true),
-
   new SlashCommandBuilder()
     .setName('summarize')
     .setDescription('Summarize text')
     .addStringOption(o => o.setName('text').setDescription('Text to summarize').setRequired(true)).setDMPermission(true),
-
   new SlashCommandBuilder()
     .setName('translate')
     .setDescription('Translate text')
     .addStringOption(o => o.setName('text').setDescription('Text to translate').setRequired(true))
     .addStringOption(o => o.setName('lang').setDescription('Target language').setRequired(true)).setDMPermission(true),
-
   new SlashCommandBuilder()
     .setName('code')
     .setDescription('Generate code')
     .addStringOption(o => o.setName('prompt').setDescription('What code you want').setRequired(true)).setDMPermission(true),
-
   new SlashCommandBuilder()
     .setName('poll')
     .setDescription('Create poll')
     .addStringOption(o => o.setName('question').setDescription('Poll question').setRequired(true)).setDMPermission(true),
-
   new SlashCommandBuilder().setName('stats').setDescription('Server stats').setDMPermission(true),
-
   new SlashCommandBuilder()
     .setName('remind')
     .setDescription('Set reminder')
     .addStringOption(o => o.setName('text').setDescription('Reminder text').setRequired(true))
     .addIntegerOption(o => o.setName('seconds').setDescription('Delay in seconds').setRequired(true)).setDMPermission(true),
-
   new SlashCommandBuilder()
     .setName('ban')
     .setDescription('Ban user')
     .addUserOption(o => o.setName('user').setDescription('User to ban').setRequired(true)).setDMPermission(true),
-
   new SlashCommandBuilder()
     .setName('search')
     .setDescription('Search web')
     .addStringOption(o => o.setName('query').setDescription('Search query').setRequired(true)).setDMPermission(true),
-
   new SlashCommandBuilder().setName('portfolio').setDescription('Get information about creator.').setDMPermission(true),
   new SlashCommandBuilder().setName('websites').setDescription('Get creator websites.').setDMPermission(true),
   new SlashCommandBuilder().setName('dashboard').setDescription('Edit my settings').setDMPermission(true),
-
   new SlashCommandBuilder()
     .setName('ask')
     .setDescription('Ask JARVIS anything')
     .addStringOption(o =>
       o.setName('question').setDescription('Your question').setRequired(true)
     ).setDMPermission(true),
-
-    new SlashCommandBuilder()
-  .setName('imagine')
-  .setDescription('Generate an image from a prompt 🎨')
-  .addStringOption(o =>
-    o.setName('prompt').setDescription('What to generate').setRequired(true)
-  )
-  .setDMPermission(true),
-
+  new SlashCommandBuilder()
+    .setName('imagine')
+    .setDescription('Generate an image from a prompt 🎨')
+    .addStringOption(o =>
+      o.setName('prompt').setDescription('What to generate').setRequired(true)
+    ).setDMPermission(true),
   new SlashCommandBuilder()
     .setName('mode')
     .setDescription('Switch JARVIS personality mode')
@@ -1082,68 +1026,57 @@ const commands = [
           { name: 'evil',   value: 'evil'   }
         )
     ).setDMPermission(true),
-
   new SlashCommandBuilder()
     .setName('roast')
     .setDescription('Roast a user 🔥')
     .addUserOption(o => o.setName('user').setDescription('User to roast').setRequired(true))
     .setDMPermission(true),
-
   new SlashCommandBuilder()
     .setName('browse')
     .setDescription('Fetch and summarize any website')
     .addStringOption(o =>
       o.setName('url').setDescription('Website URL').setRequired(true)
     ).setDMPermission(true),
-
   new SlashCommandBuilder()
     .setName('trivia')
     .setDescription('Answer an AI trivia question')
     .setDMPermission(true),
-
   new SlashCommandBuilder()
     .setName('wouldyourather')
     .setDescription('Would you rather...')
     .setDMPermission(true),
-
   new SlashCommandBuilder()
     .setName('warn')
     .setDescription('Warn a user')
     .addUserOption(o => o.setName('user').setDescription('User to warn').setRequired(true))
     .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(true))
     .setDMPermission(true),
-
   new SlashCommandBuilder()
     .setName('warnings')
     .setDescription('Check warnings for a user')
     .addUserOption(o => o.setName('user').setDescription('User to check').setRequired(true))
     .setDMPermission(true),
-
   new SlashCommandBuilder()
     .setName('news')
     .setDescription('Get latest news on a topic')
     .addStringOption(o => o.setName('topic').setDescription('Topic to search').setRequired(true))
     .setDMPermission(true),
-
   new SlashCommandBuilder()
     .setName('define')
     .setDescription('Define a word')
     .addStringOption(o => o.setName('word').setDescription('Word to define').setRequired(true))
     .setDMPermission(true),
-
   new SlashCommandBuilder()
     .setName('clearwarnings')
     .setDescription('Clear all warnings for a user')
     .addUserOption(o => o.setName('user').setDescription('User to clear').setRequired(true))
     .setDMPermission(true),
-
   new SlashCommandBuilder()
     .setName('kick')
     .setDescription('Kick a user from the server')
     .addUserOption(o => o.setName('user').setDescription('User to kick').setRequired(true))
     .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false))
     .setDMPermission(true),
-
   new SlashCommandBuilder()
     .setName('timeout')
     .setDescription('Timeout a user')
@@ -1151,38 +1084,29 @@ const commands = [
     .addIntegerOption(o => o.setName('minutes').setDescription('Duration in minutes').setRequired(true).setMinValue(1).setMaxValue(40320))
     .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false))
     .setDMPermission(true),
-
   new SlashCommandBuilder()
     .setName('leaderboard')
     .setDescription('Show trivia leaderboard')
     .setDMPermission(true),
-
   new SlashCommandBuilder()
     .setName('8ball')
     .setDescription('Ask the magic 8ball a question')
     .addStringOption(o => o.setName('question').setDescription('Your yes/no question').setRequired(true))
     .setDMPermission(true),
-
-  // ─── LOGGING COMMANDS ────────────────────────────────────────
   new SlashCommandBuilder()
     .setName('setlogchannel')
     .setDescription('Set the channel where JARVIS sends server logs')
     .addChannelOption(o =>
       o.setName('channel').setDescription('Log channel').setRequired(true)
-    )
-    .setDMPermission(false),
-
+    ).setDMPermission(false),
   new SlashCommandBuilder()
     .setName('disablelogs')
     .setDescription('Disable server logging for this server')
     .setDMPermission(false),
-
   new SlashCommandBuilder()
     .setName('logs')
     .setDescription('View recent server log events (last 10)')
     .setDMPermission(false),
-
-  // ─── AUTO MODERATION COMMANDS ────────────────────────────────
   new SlashCommandBuilder()
     .setName('automod')
     .setDescription('Configure auto moderation for this server')
@@ -1249,56 +1173,46 @@ const commands = [
         .setDescription('Show current automod config for this server')
     )
     .setDMPermission(false),
-
-    new SlashCommandBuilder()
-  .setName('join')
-  .setDescription('Join your voice channel and start listening')
-  .setDMPermission(false),
-
-new SlashCommandBuilder()
-  .setName('leave')
-  .setDescription('Leave the voice channel')
-  .setDMPermission(false),
-
-
   new SlashCommandBuilder()
-  .setName('ticket')
-  .setDescription('Open a support ticket')
-  .addStringOption(o =>
-    o.setName('reason').setDescription('What do you need help with?').setRequired(true)
-  )
-  .setDMPermission(false),
-
-new SlashCommandBuilder()
-  .setName('closeticket')
-  .setDescription('Close this support ticket')
-  .setDMPermission(false),
-
-new SlashCommandBuilder()
-  .setName('addtoticket')
-  .setDescription('Add a user to this ticket')
-  .addUserOption(o => o.setName('user').setDescription('User to add').setRequired(true))
-  .setDMPermission(false),
-
-new SlashCommandBuilder()
-  .setName('setticketcategory')
-  .setDescription('Set the category where ticket channels are created (admin only)')
-  .addStringOption(o => o.setName('categoryid').setDescription('Category ID').setRequired(true))
-  .setDMPermission(false),
-
+    .setName('join')
+    .setDescription('Join your voice channel and start listening')
+    .setDMPermission(false),
+  new SlashCommandBuilder()
+    .setName('leave')
+    .setDescription('Leave the voice channel')
+    .setDMPermission(false),
+  new SlashCommandBuilder()
+    .setName('ticket')
+    .setDescription('Open a support ticket')
+    .addStringOption(o =>
+      o.setName('reason').setDescription('What do you need help with?').setRequired(true)
+    ).setDMPermission(false),
+  new SlashCommandBuilder()
+    .setName('closeticket')
+    .setDescription('Close this support ticket')
+    .setDMPermission(false),
+  new SlashCommandBuilder()
+    .setName('addtoticket')
+    .setDescription('Add a user to this ticket')
+    .addUserOption(o => o.setName('user').setDescription('User to add').setRequired(true))
+    .setDMPermission(false),
+  new SlashCommandBuilder()
+    .setName('setticketcategory')
+    .setDescription('Set the category where ticket channels are created (admin only)')
+    .addStringOption(o => o.setName('categoryid').setDescription('Category ID').setRequired(true))
+    .setDMPermission(false),
 ].map(c => c.toJSON());
+
 // =========================
 // DEPLOY COMMANDS
 // =========================
 async function deployCommands() {
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-
   const dmCommands = commands.map(cmd => ({
     ...cmd,
     integration_types: [0, 1],
     contexts: [0, 1, 2]
   }));
-
   const result = await rest.put(
     Routes.applicationCommands(process.env.CLIENT_ID),
     { body: dmCommands }
@@ -1313,8 +1227,6 @@ client.once('clientReady', async () => {
   await loadMemory();
   console.log(`ONLINE 🔥 als ${client.user.tag}`);
   await deployCommands();
-
-  // Pick up dashboard config changes every 15s without a restart
   setInterval(refreshDashboardConfig, 15_000);
 });
 
@@ -1322,19 +1234,17 @@ client.once('clientReady', async () => {
 // INTERACTIONS
 // =========================
 client.on('interactionCreate', async (interaction) => {
+
   // ── Trivia answer buttons ─────────────────────────────────────
   if (interaction.isButton() && interaction.customId.startsWith('trivia_')) {
     const triviaKey = `trivia-${interaction.channelId}`;
     const correct = memory[triviaKey];
-
     if (!correct) {
       return interaction.reply({ content: '❌ This trivia question has expired or was already answered.', flags: 64 });
     }
-
     const chosen = interaction.customId.split('_')[1];
     delete memory[triviaKey];
     await saveMemory(memory);
-
     if (chosen === correct) {
       const scoreKey = `trivia-score-${interaction.user.id}`;
       const current = await redis.get(scoreKey);
@@ -1346,39 +1256,35 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply(`❌ **${interaction.user.username}** picked **${chosen}**, but the correct answer was **${correct}**.`);
     }
   }
+
+  // ── Close ticket button ───────────────────────────────────────
   if (interaction.isButton() && interaction.customId.startsWith('closeticket_')) {
-  if (!interaction.guild) return;
-
-  const isStaff = interaction.member.permissions.has('ManageChannels');
-  const ticketOwnerId = interaction.customId.split('_')[1];
-  const isOwnerOfTicket = ticketOwnerId === interaction.user.id;
-
-  if (!isStaff && !isOwnerOfTicket) {
-    return interaction.reply({ content: '❌ Only staff or the ticket owner can close this.', flags: 64 });
+    if (!interaction.guild) return;
+    const isStaff = interaction.member.permissions.has('ManageChannels');
+    const ticketOwnerId = interaction.customId.split('_')[1];
+    const isOwnerOfTicket = ticketOwnerId === interaction.user.id;
+    if (!isStaff && !isOwnerOfTicket) {
+      return interaction.reply({ content: '❌ Only staff or the ticket owner can close this.', flags: 64 });
+    }
+    await interaction.reply('🔒 Closing ticket in 5 seconds...');
+    const ownerEntry = Object.entries(memory).find(
+      ([key, val]) =>
+        key.startsWith(`ticket-${interaction.guild.id}-`) &&
+        val === interaction.channel.id
+    );
+    if (ownerEntry) {
+      delete memory[ownerEntry[0]];
+      await saveMemory(memory);
+    }
+    await pushLogEvent(interaction.guild.id, {
+      type: 'ticketClose',
+      userId: interaction.user.id,
+      username: interaction.user.tag,
+      detail: `Closed ticket: ${interaction.channel.name} via button`
+    });
+    setTimeout(() => interaction.channel.delete().catch(console.error), 5000);
+    return;
   }
-
-  await interaction.reply('🔒 Closing ticket in 5 seconds...');
-
-  // Clean up memory ref
-  const ownerEntry = Object.entries(memory).find(
-    ([key, val]) =>
-      key.startsWith(`ticket-${interaction.guild.id}-`) &&
-      val === interaction.channel.id
-  );
-  if (ownerEntry) {
-    delete memory[ownerEntry[0]];
-    await saveMemory(memory);
-  }
-
-  await pushLogEvent(interaction.guild.id, {
-    type: 'ticketClose',
-    userId: interaction.user.id,
-    username: interaction.user.tag,
-    detail: `Closed ticket: ${interaction.channel.name} via button`
-  });
-
-  setTimeout(() => interaction.channel.delete().catch(console.error), 5000);
-}
 
   if (!interaction.isChatInputCommand()) return;
 
@@ -1434,17 +1340,14 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.commandName === 'invite') {
     return interaction.reply({ content: `🚀 Invite me here:\n👉 https://jarvisbot-rust.vercel.app/` });
   }
-
   if (interaction.commandName === 'portfolio') {
     return interaction.reply({ content: `🚀 See my Creators Portfolio here:\n👉 https://widoe-portfolio.vercel.app/` });
   }
-
   if (interaction.commandName === 'websites') {
     return interaction.reply({
       content: `🚀 See my Creators Websites here:\n👉 https://widoe-portfolio.vercel.app/\nhttps://jarvisbot-rust.vercel.app/\nhttps://pokedex-bice-zeta-61.vercel.app/`
     });
   }
-
   if (interaction.commandName === 'dashboard') {
     return interaction.reply({
       content: `🚀 See my Dashboard here:\n👉 https://jarvisbot-rust.vercel.app/dashboard.html`
@@ -1520,7 +1423,6 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-
   if (interaction.commandName === 'feedback') {
     const feedback = interaction.options.getString('message');
     const rating = interaction.options.getInteger('rating');
@@ -1565,211 +1467,160 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   // ── /setticketcategory ────────────────────────────────────────
-if (interaction.commandName === 'setticketcategory') {
-  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
-  if (!interaction.member.permissions.has('ManageGuild')) {
-    return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
-  }
-  const categoryId = interaction.options.getString('categoryid');
-  const category = interaction.guild.channels.cache.get(categoryId);
-  if (!category || category.type !== 4) { // 4 = CategoryChannel
-    return interaction.reply({ content: '❌ Invalid category ID. Right-click a category → Copy ID.', flags: 64 });
-  }
-  memory.ticketCategories = memory.ticketCategories || {};
-  memory.ticketCategories[interaction.guild.id] = categoryId;
-  await saveMemory(memory);
-  return interaction.reply(`✅ Ticket channels will now be created under **${category.name}**.`);
-}
-
-// ── /ticket ───────────────────────────────────────────────────
-if (interaction.commandName === 'ticket') {
-  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
-
-  // One open ticket per user per server
-  const existingKey = `ticket-${interaction.guild.id}-${interaction.user.id}`;
-  const existingChannelId = memory[existingKey];
-  if (existingChannelId) {
-    const existing = interaction.guild.channels.cache.get(existingChannelId);
-    if (existing) {
-      return interaction.reply({
-        content: `❌ You already have an open ticket: <#${existingChannelId}>`,
-        flags: 64
-      });
+  if (interaction.commandName === 'setticketcategory') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    if (!interaction.member.permissions.has('ManageGuild')) {
+      return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
     }
-    // Channel was deleted manually — clean up stale ref
-    delete memory[existingKey];
+    const categoryId = interaction.options.getString('categoryid');
+    const category = interaction.guild.channels.cache.get(categoryId);
+    if (!category || category.type !== 4) {
+      return interaction.reply({ content: '❌ Invalid category ID. Right-click a category → Copy ID.', flags: 64 });
+    }
+    memory.ticketCategories = memory.ticketCategories || {};
+    memory.ticketCategories[interaction.guild.id] = categoryId;
+    await saveMemory(memory);
+    return interaction.reply(`✅ Ticket channels will now be created under **${category.name}**.`);
   }
 
-  const reason = interaction.options.getString('reason');
-  const categoryId = memory.ticketCategories?.[interaction.guild.id] || null;
+  // ── /ticket ───────────────────────────────────────────────────
+  if (interaction.commandName === 'ticket') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    const existingKey = `ticket-${interaction.guild.id}-${interaction.user.id}`;
+    const existingChannelId = memory[existingKey];
+    if (existingChannelId) {
+      const existing = interaction.guild.channels.cache.get(existingChannelId);
+      if (existing) {
+        return interaction.reply({ content: `❌ You already have an open ticket: <#${existingChannelId}>`, flags: 64 });
+      }
+      delete memory[existingKey];
+    }
+    const reason = interaction.options.getString('reason');
+    const categoryId = memory.ticketCategories?.[interaction.guild.id] || null;
+    const countKey = `ticket-count-${interaction.guild.id}`;
+    const currentCount = parseInt(await redis.get(countKey) || '0') + 1;
+    await redis.set(countKey, currentCount);
+    try {
+      const channelOptions = {
+        name: `ticket-${currentCount}-${interaction.user.username}`.slice(0, 100),
+        topic: `Support ticket for ${interaction.user.tag} | Reason: ${reason}`,
+        permissionOverwrites: [
+          { id: interaction.guild.id, deny: ['ViewChannel'] },
+          { id: interaction.user.id, allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory', 'AttachFiles'] },
+          { id: client.user.id, allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory', 'ManageChannels'] }
+        ]
+      };
+      if (categoryId) channelOptions.parent = categoryId;
+      const ticketChannel = await interaction.guild.channels.create(channelOptions);
+      memory[existingKey] = ticketChannel.id;
+      await saveMemory(memory);
+      const embed = new EmbedBuilder()
+        .setColor(0x5865f2)
+        .setTitle(`🎫 Ticket #${currentCount}`)
+        .setDescription(`Hey <@${interaction.user.id}>, support is on the way!\n\nDescribe your issue in detail and a staff member will be with you shortly.`)
+        .addFields(
+          { name: '📋 Reason', value: reason },
+          { name: '👤 Opened by', value: `${interaction.user.tag}`, inline: true },
+          { name: '🕒 Opened at', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true }
+        )
+        .setFooter({ text: 'JARVIS Ticket System • Click the button below to close' })
+        .setTimestamp();
+      const closeButton = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`closeticket_${interaction.user.id}`)
+          .setLabel('🔒 Close Ticket')
+          .setStyle(ButtonStyle.Danger)
+      );
+      await ticketChannel.send({ content: `<@${interaction.user.id}>`, embeds: [embed], components: [closeButton] });
+      await pushLogEvent(interaction.guild.id, {
+        type: 'ticketOpen',
+        userId: interaction.user.id,
+        username: interaction.user.tag,
+        detail: `Opened ticket #${currentCount} — ${reason}`
+      });
+      const logEmbed = new EmbedBuilder()
+        .setColor(0x5865f2)
+        .setTitle('🎫 Ticket Opened')
+        .addFields(
+          { name: 'User',   value: `<@${interaction.user.id}> (${interaction.user.tag})`, inline: true },
+          { name: 'Ticket', value: `<#${ticketChannel.id}>`, inline: true },
+          { name: 'Reason', value: reason }
+        )
+        .setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` })
+        .setTimestamp();
+      await sendLog(interaction.guild.id, logEmbed);
+      return interaction.reply({ content: `✅ Your ticket has been opened: <#${ticketChannel.id}>`, flags: 64 });
+    } catch (err) {
+      console.error('[Ticket] create failed:', err);
+      return interaction.reply({ content: '❌ Failed to create ticket channel. Make sure I have **Manage Channels** permission.', flags: 64 });
+    }
+  }
 
-  // Count total tickets this guild has ever made (for ticket number)
-  const countKey = `ticket-count-${interaction.guild.id}`;
-  const currentCount = parseInt(await redis.get(countKey) || '0') + 1;
-  await redis.set(countKey, currentCount);
-
-  try {
-    const channelOptions = {
-      name: `ticket-${currentCount}-${interaction.user.username}`.slice(0, 100),
-      topic: `Support ticket for ${interaction.user.tag} | Reason: ${reason}`,
-      permissionOverwrites: [
-        {
-          id: interaction.guild.id, // @everyone
-          deny: ['ViewChannel']
-        },
-        {
-          id: interaction.user.id,
-          allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory', 'AttachFiles']
-        },
-        {
-          id: client.user.id,
-          allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory', 'ManageChannels']
-        }
-      ]
-    };
-
-    if (categoryId) channelOptions.parent = categoryId;
-
-    const ticketChannel = await interaction.guild.channels.create(channelOptions);
-
-    // Save ticket ref
-    memory[existingKey] = ticketChannel.id;
-    await saveMemory(memory);
-
-    // Opening embed
-    const embed = new EmbedBuilder()
-      .setColor(0x5865f2)
-      .setTitle(`🎫 Ticket #${currentCount}`)
-      .setDescription(`Hey <@${interaction.user.id}>, support is on the way!\n\nDescribe your issue in detail and a staff member will be with you shortly.`)
-      .addFields(
-        { name: '📋 Reason', value: reason },
-        { name: '👤 Opened by', value: `${interaction.user.tag}`, inline: true },
-        { name: '🕒 Opened at', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true }
-      )
-      .setFooter({ text: 'JARVIS Ticket System • Click the button below to close' })
-      .setTimestamp();
-
-    const closeButton = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`closeticket_${interaction.user.id}`)
-        .setLabel('🔒 Close Ticket')
-        .setStyle(ButtonStyle.Danger)
+  // ── /closeticket ──────────────────────────────────────────────
+  if (interaction.commandName === 'closeticket') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    const isStaff = interaction.member.permissions.has('ManageChannels');
+    const isTicketChannel = interaction.channel.name.startsWith('ticket-');
+    if (!isTicketChannel) {
+      return interaction.reply({ content: '❌ This command only works inside a ticket channel.', flags: 64 });
+    }
+    const ownerEntry = Object.entries(memory).find(
+      ([key, val]) =>
+        key.startsWith(`ticket-${interaction.guild.id}-`) &&
+        val === interaction.channel.id
     );
-
-    await ticketChannel.send({
-      content: `<@${interaction.user.id}>`,
-      embeds: [embed],
-      components: [closeButton]
-    });
-
-    // Log it
+    const ticketOwnerId = ownerEntry?.[0]?.split('-').pop();
+    const isOwnerOfTicket = ticketOwnerId === interaction.user.id;
+    if (!isStaff && !isOwnerOfTicket) {
+      return interaction.reply({ content: '❌ Only staff or the ticket owner can close this.', flags: 64 });
+    }
+    await interaction.reply('🔒 Closing ticket in 5 seconds...');
+    if (ownerEntry) {
+      delete memory[ownerEntry[0]];
+      await saveMemory(memory);
+    }
     await pushLogEvent(interaction.guild.id, {
-      type: 'ticketOpen',
+      type: 'ticketClose',
       userId: interaction.user.id,
       username: interaction.user.tag,
-      detail: `Opened ticket #${currentCount} — ${reason}`
+      detail: `Closed ticket channel: ${interaction.channel.name}`
     });
-
     const logEmbed = new EmbedBuilder()
-      .setColor(0x5865f2)
-      .setTitle('🎫 Ticket Opened')
+      .setColor(0xed4245)
+      .setTitle('🔒 Ticket Closed')
       .addFields(
-        { name: 'User',    value: `<@${interaction.user.id}> (${interaction.user.tag})`, inline: true },
-        { name: 'Ticket',  value: `<#${ticketChannel.id}>`,                               inline: true },
-        { name: 'Reason',  value: reason }
+        { name: 'Closed by', value: `<@${interaction.user.id}> (${interaction.user.tag})`, inline: true },
+        { name: 'Channel',   value: interaction.channel.name, inline: true }
       )
       .setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` })
       .setTimestamp();
     await sendLog(interaction.guild.id, logEmbed);
-
-    return interaction.reply({
-      content: `✅ Your ticket has been opened: <#${ticketChannel.id}>`,
-      flags: 64
-    });
-
-  } catch (err) {
-    console.error('[Ticket] create failed:', err);
-    return interaction.reply({ content: '❌ Failed to create ticket channel. Make sure I have **Manage Channels** permission.', flags: 64 });
-  }
-}
-
-// ── /closeticket ──────────────────────────────────────────────
-if (interaction.commandName === 'closeticket') {
-  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
-
-  const isStaff = interaction.member.permissions.has('ManageChannels');
-  const isTicketChannel = interaction.channel.name.startsWith('ticket-');
-
-  if (!isTicketChannel) {
-    return interaction.reply({ content: '❌ This command only works inside a ticket channel.', flags: 64 });
+    setTimeout(() => interaction.channel.delete().catch(console.error), 5000);
+    return;
   }
 
-  // Find the owner of this ticket
-  const ownerEntry = Object.entries(memory).find(
-    ([key, val]) =>
-      key.startsWith(`ticket-${interaction.guild.id}-`) &&
-      val === interaction.channel.id
-  );
-
-  const ticketOwnerId = ownerEntry?.[0]?.split('-').pop();
-  const isOwnerOfTicket = ticketOwnerId === interaction.user.id;
-
-  if (!isStaff && !isOwnerOfTicket) {
-    return interaction.reply({ content: '❌ Only staff or the ticket owner can close this.', flags: 64 });
+  // ── /addtoticket ──────────────────────────────────────────────
+  if (interaction.commandName === 'addtoticket') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    if (!interaction.channel.name.startsWith('ticket-')) {
+      return interaction.reply({ content: '❌ This command only works inside a ticket channel.', flags: 64 });
+    }
+    if (!interaction.member.permissions.has('ManageChannels')) {
+      return interaction.reply({ content: '❌ Staff only.', flags: 64 });
+    }
+    const target = interaction.options.getUser('user');
+    try {
+      await interaction.channel.permissionOverwrites.create(target.id, {
+        ViewChannel: true,
+        SendMessages: true,
+        ReadMessageHistory: true
+      });
+      return interaction.reply(`✅ Added <@${target.id}> to this ticket.`);
+    } catch (err) {
+      console.error(err);
+      return interaction.reply({ content: '❌ Failed to add user.', flags: 64 });
+    }
   }
-
-  await interaction.reply('🔒 Closing ticket in 5 seconds...');
-
-  // Clean up memory
-  if (ownerEntry) {
-    delete memory[ownerEntry[0]];
-    await saveMemory(memory);
-  }
-
-  // Log it
-  await pushLogEvent(interaction.guild.id, {
-    type: 'ticketClose',
-    userId: interaction.user.id,
-    username: interaction.user.tag,
-    detail: `Closed ticket channel: ${interaction.channel.name}`
-  });
-
-  const logEmbed = new EmbedBuilder()
-    .setColor(0xed4245)
-    .setTitle('🔒 Ticket Closed')
-    .addFields(
-      { name: 'Closed by', value: `<@${interaction.user.id}> (${interaction.user.tag})`, inline: true },
-      { name: 'Channel',   value: interaction.channel.name,                               inline: true }
-    )
-    .setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` })
-    .setTimestamp();
-  await sendLog(interaction.guild.id, logEmbed);
-
-  setTimeout(() => interaction.channel.delete().catch(console.error), 5000);
-}
-
-// ── /addtoticket ──────────────────────────────────────────────
-if (interaction.commandName === 'addtoticket') {
-  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
-  if (!interaction.channel.name.startsWith('ticket-')) {
-    return interaction.reply({ content: '❌ This command only works inside a ticket channel.', flags: 64 });
-  }
-  if (!interaction.member.permissions.has('ManageChannels')) {
-    return interaction.reply({ content: '❌ Staff only.', flags: 64 });
-  }
-  const target = interaction.options.getUser('user');
-  try {
-    await interaction.channel.permissionOverwrites.create(target.id, {
-      ViewChannel: true,
-      SendMessages: true,
-      ReadMessageHistory: true
-    });
-    return interaction.reply(`✅ Added <@${target.id}> to this ticket.`);
-  } catch (err) {
-    console.error(err);
-    return interaction.reply({ content: '❌ Failed to add user.', flags: 64 });
-  }
-}
 
   if (interaction.commandName === 'help') {
     return interaction.reply({
@@ -1822,6 +1673,10 @@ if (interaction.commandName === 'addtoticket') {
 /automod ignorerole - toggle a bypass role (admin only)
 /automod status - view current automod config
 /imagine - generate an image from a prompt
+/ticket - open a support ticket
+/closeticket - close this ticket
+/addtoticket - add a user to a ticket (staff)
+/setticketcategory - set ticket category (admin)
 `)
       ]
     });
@@ -2027,19 +1882,19 @@ Never write @everyone or @here in your reply.`
         detail: `Kicked by ${interaction.user.tag} — ${reason}`
       };
       await pushLogEvent(interaction.guild.id, event);
-      const logEmbed = new EmbedBuilder()
-        .setColor(LOG_COLORS.kick)
-        .setTitle('👢 Member Kicked')
-        .addFields(
-          { name: 'User',      value: `${target.tag}`,          inline: true },
-          { name: 'Moderator', value: interaction.user.tag,     inline: true },
-          { name: 'Reason',    value: reason }
-        )
-        .setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` })
-        .setTimestamp();
       if (isLogEventEnabled(interaction.guild.id, 'kick')) {
-  await sendLog(interaction.guild.id, logEmbed);
-}
+        const logEmbed = new EmbedBuilder()
+          .setColor(LOG_COLORS.kick)
+          .setTitle('👢 Member Kicked')
+          .addFields(
+            { name: 'User',      value: `${target.tag}`,      inline: true },
+            { name: 'Moderator', value: interaction.user.tag, inline: true },
+            { name: 'Reason',    value: reason }
+          )
+          .setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` })
+          .setTimestamp();
+        await sendLog(interaction.guild.id, logEmbed);
+      }
       return interaction.reply(`👢 **${target.username}** has been kicked. Reason: ${reason}`);
     } catch (err) {
       console.error(err);
@@ -2064,21 +1919,22 @@ Never write @everyone or @here in your reply.`
         username: target.tag,
         detail: `Timed out ${minutes}m by ${interaction.user.tag} — ${reason}`
       };
+      await pushLogEvent(interaction.guild.id, event);
+      // FIX: logEmbed defined BEFORE sendLog is called
       if (isLogEventEnabled(interaction.guild.id, 'timeout')) {
-  await sendLog(interaction.guild.id, logEmbed);
-}
-      const logEmbed = new EmbedBuilder()
-        .setColor(LOG_COLORS.timeout)
-        .setTitle('🔇 Member Timed Out')
-        .addFields(
-          { name: 'User',      value: `${target.tag}`,          inline: true },
-          { name: 'Duration',  value: `${minutes} minute(s)`,   inline: true },
-          { name: 'Moderator', value: interaction.user.tag,     inline: true },
-          { name: 'Reason',    value: reason }
-        )
-        .setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` })
-        .setTimestamp();
-      await sendLog(interaction.guild.id, logEmbed);
+        const logEmbed = new EmbedBuilder()
+          .setColor(LOG_COLORS.timeout)
+          .setTitle('🔇 Member Timed Out')
+          .addFields(
+            { name: 'User',      value: `${target.tag}`,          inline: true },
+            { name: 'Duration',  value: `${minutes} minute(s)`,   inline: true },
+            { name: 'Moderator', value: interaction.user.tag,     inline: true },
+            { name: 'Reason',    value: reason }
+          )
+          .setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` })
+          .setTimestamp();
+        await sendLog(interaction.guild.id, logEmbed);
+      }
       return interaction.reply(`🔇 **${target.username}** timed out for **${minutes} minute(s)**. Reason: ${reason}`);
     } catch (err) {
       console.error(err);
@@ -2227,20 +2083,20 @@ Never write @everyone or @here in your reply.`
       detail: `Warned by ${interaction.user.tag} — ${reason}`
     };
     await pushLogEvent(interaction.guild.id, event);
-    const logEmbed = new EmbedBuilder()
-      .setColor(LOG_COLORS.warn)
-      .setTitle('⚠️ Member Warned')
-      .addFields(
-        { name: 'User',             value: `${target.tag}`,          inline: true },
-        { name: 'Moderator',        value: interaction.user.tag,     inline: true },
-        { name: 'Total Warnings',   value: `${memory[key].length}`,  inline: true },
-        { name: 'Reason',           value: reason }
-      )
-      .setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` })
-      .setTimestamp();
     if (isLogEventEnabled(interaction.guild.id, 'warn')) {
-  await sendLog(interaction.guild.id, logEmbed);
-}
+      const logEmbed = new EmbedBuilder()
+        .setColor(LOG_COLORS.warn)
+        .setTitle('⚠️ Member Warned')
+        .addFields(
+          { name: 'User',           value: `${target.tag}`,         inline: true },
+          { name: 'Moderator',      value: interaction.user.tag,    inline: true },
+          { name: 'Total Warnings', value: `${memory[key].length}`, inline: true },
+          { name: 'Reason',         value: reason }
+        )
+        .setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` })
+        .setTimestamp();
+      await sendLog(interaction.guild.id, logEmbed);
+    }
     try { await target.send(`⚠️ You were warned in **${interaction.guild.name}**\nReason: ${reason}`); } catch {}
     return interaction.reply(`⚠️ **${target.username}** has been warned. Total warnings: **${memory[key].length}**`);
   }
@@ -2319,10 +2175,8 @@ ANSWER: <letter>`
       const text = res.choices[0].message.content;
       const answerMatch = text.match(/ANSWER:\s*([A-D])/i);
       const answer = answerMatch ? answerMatch[1].toUpperCase() : 'A';
-
       const qMatch = text.match(/QUESTION:\s*([\s\S]*?)\n[A-D]\)/i);
       const question = qMatch ? qMatch[1].trim() : text.split('\n')[0];
-
       const options = {};
       ['A', 'B', 'C', 'D'].forEach(letter => {
         const m = text.match(new RegExp(`${letter}\\)\\s*(.+)`));
@@ -2355,10 +2209,7 @@ ANSWER: <letter>`
     }
   }
 
-  // =========================
-  // LOGGING SLASH COMMANDS
-  // =========================
-
+  // ── Logging commands ──────────────────────────────────────────
   if (interaction.commandName === 'setlogchannel') {
     if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
     if (!interaction.member.permissions.has('ManageGuild')) {
@@ -2368,7 +2219,6 @@ ANSWER: <letter>`
     memory.logChannels = memory.logChannels || {};
     memory.logChannels[interaction.guild.id] = channel.id;
     await saveMemory(memory);
-
     const confirmEmbed = new EmbedBuilder()
       .setColor(0x57f287)
       .setTitle('✅ Log Channel Set')
@@ -2379,7 +2229,6 @@ ANSWER: <letter>`
       })
       .setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` })
       .setTimestamp();
-
     return interaction.reply({ embeds: [confirmEmbed] });
   }
 
@@ -2404,15 +2253,13 @@ ANSWER: <letter>`
       const existing = await redis.get(key);
       const logs = Array.isArray(existing) ? existing : (existing ? JSON.parse(existing) : []);
       if (logs.length === 0) return interaction.reply({ content: '📭 No log events recorded yet.', flags: 64 });
-
       const typeEmoji = {
         join: '📥', leave: '📤', ban: '🔨', unban: '✅', kick: '👢',
         timeout: '🔇', messageDelete: '🗑️', messageEdit: '✏️',
         channelCreate: '📢', channelDelete: '🗑️', roleCreate: '🎭',
         roleDelete: '🗑️', voiceJoin: '🔊', voiceLeave: '🔇', voiceMove: '🔀',
-        warn: '⚠️', nickChange: '📝', automod: '🛡️', ticketOpen:'🎫', ticketClose: '🔒'
+        warn: '⚠️', nickChange: '📝', automod: '🛡️', ticketOpen: '🎫', ticketClose: '🔒'
       };
-
       const recent = logs.slice(-10).reverse();
       const lines = recent.map(e => {
         const emoji = typeEmoji[e.type] || '📋';
@@ -2420,14 +2267,12 @@ ANSWER: <letter>`
         const user = e.username ? `**${e.username}**` : '';
         return `${emoji} ${time} ${user} — ${e.detail || e.type}`;
       });
-
       const embed = new EmbedBuilder()
         .setColor(0x5865f2)
         .setTitle('📋 Recent Server Events')
         .setDescription(lines.join('\n'))
         .setFooter({ text: `Last ${recent.length} events • JARVIS Logs` })
         .setTimestamp();
-
       return interaction.reply({ embeds: [embed], flags: 64 });
     } catch (err) {
       console.error(err);
@@ -2435,26 +2280,20 @@ ANSWER: <letter>`
     }
   }
 
-  // =========================
-  // AUTOMOD SLASH COMMANDS
-  // =========================
-
+  // ── Automod commands ──────────────────────────────────────────
   if (interaction.commandName === 'automod') {
     if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
     if (!interaction.member.permissions.has('ManageGuild')) {
       return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
     }
-
     const sub = interaction.options.getSubcommand();
     memory.automod = memory.automod || {};
     if (!memory.automod[interaction.guild.id]) {
       memory.automod[interaction.guild.id] = { enabled: {}, action: 'delete', ignoreRoles: [] };
     }
     const cfg = memory.automod[interaction.guild.id];
-
     const ALL_FILTERS = ['invites', 'spam', 'mentions', 'caps', 'links', 'slurs'];
 
-    // ── /automod enable ──────────────────────────────────────
     if (sub === 'enable') {
       const filter = interaction.options.getString('filter');
       if (filter === 'all') {
@@ -2467,7 +2306,6 @@ ANSWER: <letter>`
       return interaction.reply(`🛡️ AutoMod filter **${filter}** is now **enabled**.`);
     }
 
-    // ── /automod disable ─────────────────────────────────────
     if (sub === 'disable') {
       const filter = interaction.options.getString('filter');
       if (filter === 'all') {
@@ -2480,7 +2318,6 @@ ANSWER: <letter>`
       return interaction.reply(`🛡️ AutoMod filter **${filter}** is now **disabled**.`);
     }
 
-    // ── /automod action ──────────────────────────────────────
     if (sub === 'action') {
       const type = interaction.options.getString('type');
       cfg.action = type;
@@ -2494,7 +2331,6 @@ ANSWER: <letter>`
       return interaction.reply(`⚙️ AutoMod punishment set to: **${labels[type]}**`);
     }
 
-    // ── /automod ignorerole ──────────────────────────────────
     if (sub === 'ignorerole') {
       const role = interaction.options.getRole('role');
       cfg.ignoreRoles = cfg.ignoreRoles || [];
@@ -2510,7 +2346,6 @@ ANSWER: <letter>`
       }
     }
 
-    // ── /automod status ──────────────────────────────────────
     if (sub === 'status') {
       const filterNames = {
         invites:  'Discord invite links',
@@ -2524,7 +2359,6 @@ ANSWER: <letter>`
         const on = cfg.enabled?.[f];
         return `${on ? '🟢' : '🔴'} **${filterNames[f]}**`;
       }).join('\n');
-
       const ignoreList = (cfg.ignoreRoles || []).map(id => `<@&${id}>`).join(', ') || 'None';
       const actionLabels = {
         delete: '🗑️ Delete message only',
@@ -2532,96 +2366,83 @@ ANSWER: <letter>`
         timeout: '🔇 Delete + timeout (10 min)',
         kick: '👢 Delete + kick'
       };
-
       const embed = new EmbedBuilder()
         .setColor(0xff4d4d)
         .setTitle('🛡️ AutoMod Status')
         .addFields(
-          { name: 'Filters',        value: filterLines },
-          { name: 'Punishment',     value: actionLabels[cfg.action] || cfg.action },
-          { name: 'Bypass Roles',   value: ignoreList }
+          { name: 'Filters',      value: filterLines },
+          { name: 'Punishment',   value: actionLabels[cfg.action] || cfg.action },
+          { name: 'Bypass Roles', value: ignoreList }
         )
         .setFooter({ text: `JARVIS AutoMod • ${interaction.guild.name}` })
         .setTimestamp();
-
       return interaction.reply({ embeds: [embed], flags: 64 });
     }
   }
 
   if (interaction.commandName === 'imagine') {
-  await interaction.deferReply();
-  const prompt = interaction.options.getString('prompt');
-
-  // Safety check
-  if (prompt.toLowerCase().includes('@everyone') || prompt.toLowerCase().includes('@here')) {
-    return interaction.editReply("nah not doing that 💀");
-  }
-
-  try {
-    const encoded = encodeURIComponent(prompt);
-    const imageUrl = `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=1024&nologo=true&seed=${Math.floor(Math.random() * 99999)}`;
-
-    const embed = new EmbedBuilder()
-      .setColor(0x9b59b6)
-      .setTitle('🎨 Image Generated')
-      .setDescription(`**Prompt:** ${prompt}`)
-      .setImage(imageUrl)
-      .setFooter({ text: 'JARVIS AI • Powered by Pollinations.ai' });
-
-    return interaction.editReply({ embeds: [embed] });
-  } catch (err) {
-    console.error(err);
-    return interaction.editReply('❌ Failed to generate image rq, try again');
-  }
-}
-
-if (interaction.commandName === 'join') {
-  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
-  const member = await interaction.guild.members.fetch(interaction.user.id);
-  const voiceChannel = member.voice.channel;
-  if (!voiceChannel) return interaction.reply({ content: '❌ Join a voice channel first.', flags: 64 });
-  const existing = getVoiceConnection(interaction.guild.id);
-  if (existing) return interaction.reply({ content: '⚠️ Already in a voice channel. Use `/leave` first.', flags: 64 });
-
-  const connection = joinVoiceChannel({
-    channelId: voiceChannel.id,
-    guildId: interaction.guild.id,
-    adapterCreator: interaction.guild.voiceAdapterCreator,
-    selfDeaf: false,
-    selfMute: false,
-  });
-
-  await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
-
-  for (const [, vcMember] of voiceChannel.members) {
-    if (vcMember.user.bot) continue;
-    listenToUser(connection, vcMember.id, interaction.guild.id, vcMember);
-  }
-
-  connection.on(VoiceConnectionStatus.Disconnected, async () => {
-    try {
-      await Promise.race([
-        entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
-        entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
-      ]);
-    } catch {
-      connection.destroy();
-      activeListeners.delete(interaction.guild.id);
+    await interaction.deferReply();
+    const prompt = interaction.options.getString('prompt');
+    if (prompt.toLowerCase().includes('@everyone') || prompt.toLowerCase().includes('@here')) {
+      return interaction.editReply("nah not doing that 💀");
     }
-  });
+    try {
+      const encoded = encodeURIComponent(prompt);
+      const imageUrl = `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=1024&nologo=true&seed=${Math.floor(Math.random() * 99999)}`;
+      const embed = new EmbedBuilder()
+        .setColor(0x9b59b6)
+        .setTitle('🎨 Image Generated')
+        .setDescription(`**Prompt:** ${prompt}`)
+        .setImage(imageUrl)
+        .setFooter({ text: 'JARVIS AI • Powered by Pollinations.ai' });
+      return interaction.editReply({ embeds: [embed] });
+    } catch (err) {
+      console.error(err);
+      return interaction.editReply('❌ Failed to generate image rq, try again');
+    }
+  }
 
-  return interaction.reply(`🎙️ Joined **${voiceChannel.name}**! Talk to me.`);
-}
+  if (interaction.commandName === 'join') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    const member = await interaction.guild.members.fetch(interaction.user.id);
+    const voiceChannel = member.voice.channel;
+    if (!voiceChannel) return interaction.reply({ content: '❌ Join a voice channel first.', flags: 64 });
+    const existing = getVoiceConnection(interaction.guild.id);
+    if (existing) return interaction.reply({ content: '⚠️ Already in a voice channel. Use `/leave` first.', flags: 64 });
+    const connection = joinVoiceChannel({
+      channelId: voiceChannel.id,
+      guildId: interaction.guild.id,
+      adapterCreator: interaction.guild.voiceAdapterCreator,
+      selfDeaf: false,
+      selfMute: false,
+    });
+    await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
+    for (const [, vcMember] of voiceChannel.members) {
+      if (vcMember.user.bot) continue;
+      listenToUser(connection, vcMember.id, interaction.guild.id, vcMember);
+    }
+    connection.on(VoiceConnectionStatus.Disconnected, async () => {
+      try {
+        await Promise.race([
+          entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
+          entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
+        ]);
+      } catch {
+        connection.destroy();
+        activeListeners.delete(interaction.guild.id);
+      }
+    });
+    return interaction.reply(`🎙️ Joined **${voiceChannel.name}**! Talk to me.`);
+  }
 
-if (interaction.commandName === 'leave') {
-  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
-  const connection = getVoiceConnection(interaction.guild.id);
-  if (!connection) return interaction.reply({ content: "❌ I'm not in a voice channel.", flags: 64 });
-  connection.destroy();
-  activeListeners.delete(interaction.guild.id);
-  return interaction.reply('👋 Left the voice channel.');
-}
-
+  if (interaction.commandName === 'leave') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    const connection = getVoiceConnection(interaction.guild.id);
+    if (!connection) return interaction.reply({ content: "❌ I'm not in a voice channel.", flags: 64 });
+    connection.destroy();
+    activeListeners.delete(interaction.guild.id);
+    return interaction.reply('👋 Left the voice channel.');
+  }
 });
 
 // =========================
@@ -2630,7 +2451,6 @@ if (interaction.commandName === 'leave') {
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
 
-  // ── Run automod on every message first ──────────────────────
   await handleAutomod(message);
 
   const content = message.content;
@@ -2747,7 +2567,6 @@ Keep it conversational and concise. Never write @everyone or @here.`
 
   const userTag = message.author.username;
   const userId = message.author.id;
-  const userIsOwner = isOwner(userId);
 
   const cleanContent = content.replace(/<@!?\d+>/g, '').trim();
 
