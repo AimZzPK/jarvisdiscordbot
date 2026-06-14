@@ -133,11 +133,9 @@ const client = new Client({
 // AI
 // =========================
 const groq = new OpenAI({
-  apiKey: process.env.OPENROUTER_API_KEY,
-  baseURL: "https://openrouter.ai/api/v1"
+  apiKey: process.env.GROQ_API_KEY,
+  baseURL: "https://api.groq.com/openai/v1"
 });
-
-const isOwner = (id) => id === OWNER_ID;
 
 // =========================
 // PERSONALITY MODES
