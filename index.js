@@ -770,7 +770,7 @@ async function createTicketChannel(guild, user, reason, panelId = 'support') {
   memory[existingKey] = ticketChannel.id;
   await saveMemory(memory);
 
-  const color = parseInt((panel.color || '#5865f2').replace('#', ''), 16);
+  const color = parseInt((panel.color || '#5865f2').replace(/^#/, ''), 16) || 0x5865f2;
   const embed = new EmbedBuilder()
     .setColor(color)
     .setTitle(`🎫 ${panel.title} — Ticket #${currentCount}`)
@@ -1711,7 +1711,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     const panel = getPanel(interaction.guild.id, panelId);
-    const color = parseInt((panel.color || '#5865f2').replace('#', ''), 16);
+    const color = parseInt((panel.color || '#5865f2').replace(/^#/, ''), 16) || 0x5865f2;
 
     const embed = new EmbedBuilder()
       .setColor(color)
