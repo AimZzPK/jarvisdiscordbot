@@ -1817,7 +1817,7 @@ RESPONSE FORMAT:
 `;
 
   try {
-    const res = await groq.chat.completions.create({ model: "meta-llama/llama-3.1-8b-instruct", messages: [{ role: "system", content: system }, ...convo.messages], temperature: 0.85, max_tokens: 300 });
+    const res = await groq.chat.completions.create({ model: "llama-3.1-8b-instant", messages: [{ role: "system", content: system }, ...convo.messages], temperature: 0.85, max_tokens: 300 });
     const reply = res.choices[0].message.content.replace(/@everyone/gi, '`@everyone`').replace(/@here/gi, '`@here`');
     convo.messages.push({ role: "assistant", content: reply });
     saveMemory(memory);
