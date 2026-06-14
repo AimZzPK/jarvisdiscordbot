@@ -1035,6 +1035,13 @@ const commands = [
     .setName('listpanels').setDescription('List all ticket panels configured for this server')
     .setDMPermission(false),
 
+
+    new SlashCommandBuilder()
+  .setName('broadcast')
+  .setDescription('Send a message to all servers (owner only)')
+  .addStringOption(o => o.setName('message').setDescription('Message to broadcast').setRequired(true))
+  .addStringOption(o => o.setName('channel').setDescription('Channel name to target (default: general)').setRequired(false))
+  .setDMPermission(true),
 ].map(c => c.toJSON());
 
 // =========================
@@ -1731,6 +1738,54 @@ client.on('interactionCreate', async (interaction) => {
     await interaction.channel.send({ embeds: [embed], components: [row] });
     return interaction.reply({ content: `✅ **${panel.title || panel.id}** panel posted!`, flags: 64 });
   }
+
+  // ── /broadcast ─────────────────────────────────────────────────
+if (interaction.commandName === 'broadcast') {
+  if (!isOwner(interaction.user.id)) return interaction.reply({ content: '❌ Owner only.', flags: 64 });
+
+  await interaction.deferReply({ flags: 64 });
+
+  const msg = interaction.options.getString('message');
+  const targetChannelName = interaction.options.getString('channel') || 'general';
+
+  const guilds = await client.guilds.fetch();
+  let sent = 0, failed = 0;
+
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle('📢 Message from JARVIS Owner')
+    .setDescription(msg)
+    .setFooter({ text: `Sent by ${OWNER_NAME} • JARVIS` })
+    .setTimestamp();
+
+  for (const [, oauthGuild] of guilds) {
+    try {
+      const guild = await client.guilds.fetch(oauthGuild.id);
+
+      // Try to find target channel name, fallback to first sendable channel
+      const channel =
+        guild.channels.cache.find(
+          c => c.name.toLowerCase() === targetChannelName.toLowerCase() &&
+          c.isTextBased() &&
+          c.permissionsFor(guild.members.me)?.has('SendMessages')
+        ) ||
+        guild.channels.cache.find(
+          c => c.isTextBased() &&
+          c.permissionsFor(guild.members.me)?.has('SendMessages')
+        );
+
+      if (!channel) { failed++; continue; }
+
+      await channel.send({ embeds: [embed] });
+      sent++;
+    } catch (err) {
+      console.error(`[Broadcast] Failed for guild ${oauthGuild.id}:`, err.message);
+      failed++;
+    }
+  }
+
+  return interaction.editReply(`📢 Broadcast complete!\n✅ Sent to **${sent}** server(s)\n❌ Failed: **${failed}**`);
+}
 });
 
 // =========================
