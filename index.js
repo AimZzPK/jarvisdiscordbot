@@ -47,6 +47,10 @@ function setCooldown(userId) {
   cooldowns.set(userId, Date.now());
 }
 
+function isOwner(userId) {
+  return userId === OWNER_ID;
+}
+
 // =========================
 // CONFIG
 // =========================
