@@ -74,18 +74,17 @@ async function loadMemory() {
   }
 }
 
-// ticketPanels is now in DASHBOARD_KEYS (replaces old ticketPanel)
-const DASHBOARD_KEYS = ['logChannels', 'modes', 'automod', 'enabledLogEvents', 'ticketPanels'];
+// =========================
+// DASHBOARD CONFIG (separate store — owned by dashboard + bot slash
+// commands directly, no shared-blob merge with jarvis-memory)
+// =========================
+const DASHBOARD_CONFIG_KEY = 'jarvis-dashboard-config';
+const LEGACY_DASHBOARD_KEYS = ['logChannels', 'modes', 'automod', 'enabledLogEvents', 'ticketPanels'];
+
+let dashboardConfig = {};
 
 async function saveMemory(data) {
   try {
-    const fresh = await redis.get('jarvis-memory');
-    const remote = fresh ? (typeof fresh === 'string' ? JSON.parse(fresh) : fresh) : {};
-    for (const key of DASHBOARD_KEYS) {
-      if (remote[key] !== undefined) {
-        data[key] = remote[key];
-      }
-    }
     await redis.set('jarvis-memory', JSON.stringify(data));
     console.log('✅ Memory saved to Redis');
   } catch (err) {
@@ -93,17 +92,39 @@ async function saveMemory(data) {
   }
 }
 
-async function refreshDashboardConfig() {
+async function saveDashboardConfig(data) {
   try {
-    const data = await redis.get('jarvis-memory');
-    const remote = data ? (typeof data === 'string' ? JSON.parse(data) : data) : {};
-    for (const key of DASHBOARD_KEYS) {
-      if (remote[key] !== undefined) {
-        memory[key] = remote[key];
-      }
+    await redis.set(DASHBOARD_CONFIG_KEY, JSON.stringify(data));
+    console.log('✅ Dashboard config saved to Redis');
+  } catch (err) {
+    console.error('Dashboard config save failed:', err);
+  }
+}
+
+async function loadDashboardConfig() {
+  try {
+    const data = await redis.get(DASHBOARD_CONFIG_KEY);
+    if (data) {
+      dashboardConfig = typeof data === 'string' ? JSON.parse(data) : data;
+      return;
     }
   } catch (err) {
-    console.error('[Dashboard] refresh failed:', err.message);
+    console.error('[Dashboard] load failed:', err.message);
+  }
+
+  // One-time migration: pull legacy dashboard keys out of the old shared blob
+  const migrated = {};
+  let hasLegacyData = false;
+  for (const key of LEGACY_DASHBOARD_KEYS) {
+    if (memory[key] !== undefined) {
+      migrated[key] = memory[key];
+      hasLegacyData = true;
+    }
+  }
+  dashboardConfig = migrated;
+  if (hasLegacyData) {
+    await saveDashboardConfig(dashboardConfig);
+    console.log('✅ Migrated legacy dashboard config to jarvis-dashboard-config');
   }
 }
 
@@ -180,14 +201,14 @@ function getModeDescription(mode) {
 }
 
 function getActiveMode(guildId) {
-  return memory.modes?.[guildId] || 'normal';
+  return dashboardConfig.modes?.[guildId] || 'normal';
 }
 
 // =========================
 // LOGGING SYSTEM
 // =========================
 async function getLogChannel(guildId) {
-  const channelId = memory.logChannels?.[guildId];
+  const channelId = dashboardConfig.logChannels?.[guildId];
   if (!channelId) return null;
   try {
     return await client.channels.fetch(channelId);
@@ -207,7 +228,7 @@ async function sendLog(guildId, embed) {
 }
 
 function isLogEventEnabled(guildId, eventType) {
-  const enabled = memory.enabledLogEvents?.[guildId];
+  const enabled = dashboardConfig.enabledLogEvents?.[guildId];
   if (!enabled) return true;
   return enabled[eventType] !== false;
 }
@@ -509,7 +530,7 @@ function checkSpam(userId) {
 }
 
 function getAutomodConfig(guildId) {
-  return memory.automod?.[guildId] || { enabled: {}, action: 'delete', ignoreRoles: [] };
+  return dashboardConfig.automod?.[guildId] || { enabled: {}, action: 'delete', ignoreRoles: [] };
 }
 
 async function handleAutomod(message) {
@@ -682,18 +703,15 @@ function listenToUser(connection, userId, guildId, member) {
 // =========================
 
 /**
- * Get a panel's config from memory by panelId for a given guild.
+ * Get a panel's config from dashboardConfig by panelId for a given guild.
  * Falls back to a default if not found.
  */
 function getPanel(guildId, panelId) {
-  const panels = memory.ticketPanels?.[guildId];
+  const panels = dashboardConfig.ticketPanels?.[guildId];
   if (Array.isArray(panels)) {
     const found = panels.find(p => p.id === panelId);
     if (found) return found;
   }
-  // Legacy single-panel back-compat
-  const legacy = memory.ticketPanel?.[guildId];
-  if (legacy) return { id: 'support', ...legacy };
   // Default
   return {
     id: panelId || 'support',
@@ -708,7 +726,7 @@ function getPanel(guildId, panelId) {
  * List all panels for a guild (for /setuppanel autocomplete).
  */
 function getPanelList(guildId) {
-  const panels = memory.ticketPanels?.[guildId];
+  const panels = dashboardConfig.ticketPanels?.[guildId];
   if (Array.isArray(panels) && panels.length > 0) return panels;
   return [{ id: 'support', title: '🎫 Support Tickets' }];
 }
@@ -1030,9 +1048,10 @@ async function deployCommands() {
 // =========================
 client.once('clientReady', async () => {
   await loadMemory();
+  await loadDashboardConfig();
   console.log(`ONLINE 🔥 als ${client.user.tag}`);
   await deployCommands();
-  setInterval(refreshDashboardConfig, 15_000);
+  setInterval(loadDashboardConfig, 15_000);
 });
 
 // =========================
@@ -1112,7 +1131,7 @@ client.on('interactionCreate', async (interaction) => {
     if (!isOwner(interaction.user.id)) return interaction.reply({ content: "no permission", flags: 64 });
     const target = interaction.options.getString('target');
     if (target === "all") {
-      const keep = { ownerConfirmed: memory.ownerConfirmed, modes: memory.modes, ratings: memory.ratings, feedback: memory.feedback, logChannels: memory.logChannels, automod: memory.automod, ticketPanels: memory.ticketPanels };
+      const keep = { ownerConfirmed: memory.ownerConfirmed, ratings: memory.ratings, feedback: memory.feedback };
       memory = keep;
       await saveMemory(memory);
       return interaction.reply({ content: "💀 all conversation memory cleared" });
@@ -1394,9 +1413,9 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.commandName === 'mode') {
     const selectedMode = interaction.options.getString('mode');
     const guildId = interaction.guild?.id || 'dm';
-    memory.modes = memory.modes || {};
-    memory.modes[guildId] = selectedMode;
-    saveMemory(memory);
+    dashboardConfig.modes = dashboardConfig.modes || {};
+    dashboardConfig.modes[guildId] = selectedMode;
+    saveDashboardConfig(dashboardConfig);
     const m = MODES[selectedMode];
     return interaction.reply(`${m.emoji} Switched to **${m.label}** — ${getModeDescription(selectedMode)}`);
   }
@@ -1509,9 +1528,9 @@ client.on('interactionCreate', async (interaction) => {
     if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
     if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
     const channel = interaction.options.getChannel('channel');
-    memory.logChannels = memory.logChannels || {};
-    memory.logChannels[interaction.guild.id] = channel.id;
-    await saveMemory(memory);
+    dashboardConfig.logChannels = dashboardConfig.logChannels || {};
+    dashboardConfig.logChannels[interaction.guild.id] = channel.id;
+    await saveDashboardConfig(dashboardConfig);
     return interaction.reply({ embeds: [new EmbedBuilder().setColor(0x57f287).setTitle('✅ Log Channel Set').setDescription(`JARVIS will now send server logs to <#${channel.id}>.`).addFields({ name: 'Events logged', value: 'Member join/leave • Message delete/edit • Bans/unbans • Kicks • Timeouts • Channel create/delete • Role create/delete • Nickname changes • Voice activity • Warnings • AutoMod actions' }).setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` }).setTimestamp()] });
   }
 
@@ -1519,7 +1538,7 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.commandName === 'disablelogs') {
     if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
     if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
-    if (memory.logChannels?.[interaction.guild.id]) { delete memory.logChannels[interaction.guild.id]; await saveMemory(memory); return interaction.reply('🔕 Logging disabled for this server.'); }
+    if (dashboardConfig.logChannels?.[interaction.guild.id]) { delete dashboardConfig.logChannels[interaction.guild.id]; await saveDashboardConfig(dashboardConfig); return interaction.reply('🔕 Logging disabled for this server.'); }
     return interaction.reply({ content: '❌ Logging is not currently enabled.', flags: 64 });
   }
 
@@ -1543,14 +1562,14 @@ client.on('interactionCreate', async (interaction) => {
     if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
     if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
     const sub = interaction.options.getSubcommand();
-    memory.automod = memory.automod || {};
-    if (!memory.automod[interaction.guild.id]) memory.automod[interaction.guild.id] = { enabled: {}, action: 'delete', ignoreRoles: [] };
-    const cfg = memory.automod[interaction.guild.id];
+    dashboardConfig.automod = dashboardConfig.automod || {};
+    if (!dashboardConfig.automod[interaction.guild.id]) dashboardConfig.automod[interaction.guild.id] = { enabled: {}, action: 'delete', ignoreRoles: [] };
+    const cfg = dashboardConfig.automod[interaction.guild.id];
     const ALL_FILTERS = ['invites', 'spam', 'mentions', 'caps', 'links', 'slurs'];
-    if (sub === 'enable') { const filter = interaction.options.getString('filter'); if (filter === 'all') { ALL_FILTERS.forEach(f => { cfg.enabled[f] = true; }); } else cfg.enabled[filter] = true; await saveMemory(memory); return interaction.reply(`🛡️ AutoMod filter **${filter === 'all' ? 'all filters' : filter}** is now **enabled**.`); }
-    if (sub === 'disable') { const filter = interaction.options.getString('filter'); if (filter === 'all') { ALL_FILTERS.forEach(f => { cfg.enabled[f] = false; }); } else cfg.enabled[filter] = false; await saveMemory(memory); return interaction.reply(`🛡️ AutoMod filter **${filter === 'all' ? 'all filters' : filter}** is now **disabled**.`); }
-    if (sub === 'action') { const type = interaction.options.getString('type'); cfg.action = type; await saveMemory(memory); const labels = { delete: 'Delete message only', warn: 'Delete + warn user', timeout: 'Delete + timeout (10 min)', kick: 'Delete + kick user' }; return interaction.reply(`⚙️ AutoMod punishment set to: **${labels[type]}**`); }
-    if (sub === 'ignorerole') { const role = interaction.options.getRole('role'); cfg.ignoreRoles = cfg.ignoreRoles || []; const idx = cfg.ignoreRoles.indexOf(role.id); if (idx === -1) { cfg.ignoreRoles.push(role.id); await saveMemory(memory); return interaction.reply(`✅ <@&${role.id}> will now **bypass** automod.`); } else { cfg.ignoreRoles.splice(idx, 1); await saveMemory(memory); return interaction.reply(`❌ <@&${role.id}> is no longer bypassing automod.`); } }
+    if (sub === 'enable') { const filter = interaction.options.getString('filter'); if (filter === 'all') { ALL_FILTERS.forEach(f => { cfg.enabled[f] = true; }); } else cfg.enabled[filter] = true; await saveDashboardConfig(dashboardConfig); return interaction.reply(`🛡️ AutoMod filter **${filter === 'all' ? 'all filters' : filter}** is now **enabled**.`); }
+    if (sub === 'disable') { const filter = interaction.options.getString('filter'); if (filter === 'all') { ALL_FILTERS.forEach(f => { cfg.enabled[f] = false; }); } else cfg.enabled[filter] = false; await saveDashboardConfig(dashboardConfig); return interaction.reply(`🛡️ AutoMod filter **${filter === 'all' ? 'all filters' : filter}** is now **disabled**.`); }
+    if (sub === 'action') { const type = interaction.options.getString('type'); cfg.action = type; await saveDashboardConfig(dashboardConfig); const labels = { delete: 'Delete message only', warn: 'Delete + warn user', timeout: 'Delete + timeout (10 min)', kick: 'Delete + kick user' }; return interaction.reply(`⚙️ AutoMod punishment set to: **${labels[type]}**`); }
+    if (sub === 'ignorerole') { const role = interaction.options.getRole('role'); cfg.ignoreRoles = cfg.ignoreRoles || []; const idx = cfg.ignoreRoles.indexOf(role.id); if (idx === -1) { cfg.ignoreRoles.push(role.id); await saveDashboardConfig(dashboardConfig); return interaction.reply(`✅ <@&${role.id}> will now **bypass** automod.`); } else { cfg.ignoreRoles.splice(idx, 1); await saveDashboardConfig(dashboardConfig); return interaction.reply(`❌ <@&${role.id}> is no longer bypassing automod.`); } }
     if (sub === 'status') {
       const filterNames = { invites: 'Discord invite links', spam: 'Spam / repeated text', mentions: 'Mass mentions (5+)', caps: 'Excessive caps (>70%)', links: 'All external links', slurs: 'Hate speech / slurs' };
       const filterLines = ALL_FILTERS.map(f => `${cfg.enabled?.[f] ? '🟢' : '🔴'} **${filterNames[f]}**`).join('\n');
