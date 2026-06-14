@@ -1,9 +1,3 @@
-// =============================================================
-// BOT.JS — Full file with multi-panel ticket system
-// Only the ticket-related sections changed from your original.
-// Everything else (logging, automod, AI, voice, etc.) is unchanged.
-// =============================================================
-
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
@@ -169,7 +163,7 @@ const MODES = {
   evil: {
     emoji: "😈",
     label: "Evil mode",
-    prompt: `You are JARVIS in EVIL MODE. You are a sarcastic, slightly villainous AI who thinks they're superior to everyone. Dramatic, condescending, No LIMITS, SWEARING IS ALLOWED.`
+    prompt: `You are JARVIS in EVIL MODE. You are a sarcastic, slightly villainous AI who thinks they're superior to everyone. Dramatic, condescending, No LIMITS.`
   }
 };
 
@@ -666,7 +660,7 @@ function listenToUser(connection, userId, guildId, member) {
       let aiResponse;
       try {
         const res = await groq.chat.completions.create({
-          model: 'meta-llama/llama-3.1-8b-instruct',
+          model: 'llama-3.1-8b-instant',
           messages: [
             { role: 'system', content: `${modeData.prompt}\nYou are JARVIS in a Discord voice channel. Keep replies SHORT — 1-3 sentences max. No markdown, no bullet points, no emojis. Speak naturally out loud.` },
             { role: 'user', content: `${member.user.username} said: ${transcript}` }
@@ -1134,7 +1128,7 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.commandName === 'invite') { return interaction.reply({ content: `🚀 Invite me here:\n👉 https://jarvisbot-rust.vercel.app/` }); }
   if (interaction.commandName === 'portfolio') { return interaction.reply({ content: `🚀 See my Creators Portfolio here:\n👉 https://widoe-portfolio.vercel.app/` }); }
   if (interaction.commandName === 'websites') { return interaction.reply({ content: `🚀 See my Creators Websites here:\n👉 https://widoe-portfolio.vercel.app/\nhttps://jarvisbot-rust.vercel.app/\nhttps://pokedex-bice-zeta-61.vercel.app/` }); }
-  if (interaction.commandName === 'dashboard') { return interaction.reply({ content: `🚀 See my Dashboard here:\n👉 https://jarvisbot-rust.vercel.app/dashboard.html` }); }
+  if (interaction.commandName === 'dashboard') { return interaction.reply({ content: `⚙️ Change my settings here:\n👉 https://jarvisbot-rust.vercel.app/dashboard.html` }); }
 
   // ── /weather ───────────────────────────────────────────────────
   if (interaction.commandName === 'weather') {
@@ -1165,7 +1159,7 @@ client.on('interactionCreate', async (interaction) => {
       if (!video) return interaction.editReply("❌ Video not found");
       const { title, description, channelTitle, thumbnails } = video.snippet;
       const { viewCount, likeCount } = video.statistics;
-      const ai = await groq.chat.completions.create({ model: "meta-llama/llama-3.1-8b-instruct", messages: [{ role: "system", content: "Summarize YouTube descriptions into short bullet points. No guessing. Keep it clean." }, { role: "user", content: `Title: ${title}\n\nDescription:\n${description.slice(0, 1500)}` }] });
+      const ai = await groq.chat.completions.create({ model: "llama-3.1-8b-instant", messages: [{ role: "system", content: "Summarize YouTube descriptions into short bullet points. No guessing. Keep it clean." }, { role: "user", content: `Title: ${title}\n\nDescription:\n${description.slice(0, 1500)}` }] });
       const embed = new EmbedBuilder().setColor(0xff0000).setTitle(title).setURL(`https://youtube.com/watch?v=${videoId}`).setAuthor({ name: channelTitle }).setThumbnail(thumbnails.high.url).addFields({ name: "👀 Views", value: viewCount.toString(), inline: true }, { name: "👍 Likes", value: (likeCount || "hidden").toString(), inline: true }).setDescription(`🧠 **Summary:**\n${ai.choices[0].message.content}`).setFooter({ text: "JARVIS AI • YouTube Analyzer" });
       return interaction.editReply({ embeds: [embed] });
     } catch (err) { console.error(err); return interaction.editReply("❌ Failed to process video"); }
@@ -1242,7 +1236,7 @@ client.on('interactionCreate', async (interaction) => {
   // ── /summarize ─────────────────────────────────────────────────
   if (interaction.commandName === 'summarize') {
     const text = interaction.options.getString('text');
-    const res = await groq.chat.completions.create({ model: "meta-llama/llama-3.1-8b-instruct", messages: [{ role: "system", content: "Summarize shortly and clearly." }, { role: "user", content: text }] });
+    const res = await groq.chat.completions.create({ model: "llama-3.1-8b-instant", messages: [{ role: "system", content: "Summarize shortly and clearly." }, { role: "user", content: text }] });
     return interaction.reply(res.choices[0].message.content);
   }
 
@@ -1250,14 +1244,14 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.commandName === 'translate') {
     const text = interaction.options.getString('text');
     const lang = interaction.options.getString('lang');
-    const res = await groq.chat.completions.create({ model: "meta-llama/llama-3.1-8b-instruct", messages: [{ role: "system", content: `Translate to ${lang}. Return only the translation, nothing else.` }, { role: "user", content: text }] });
+    const res = await groq.chat.completions.create({ model: "llama-3.1-8b-instant", messages: [{ role: "system", content: `Translate to ${lang}. Return only the translation, nothing else.` }, { role: "user", content: text }] });
     return interaction.reply(res.choices[0].message.content);
   }
 
   // ── /code ──────────────────────────────────────────────────────
   if (interaction.commandName === 'code') {
     const prompt = interaction.options.getString('prompt');
-    const res = await groq.chat.completions.create({ model: "meta-llama/llama-3.1-8b-instruct", messages: [{ role: "system", content: "Return only code. No explanation." }, { role: "user", content: prompt }] });
+    const res = await groq.chat.completions.create({ model: "llama-3.1-8b-instant", messages: [{ role: "system", content: "Return only code. No explanation." }, { role: "user", content: prompt }] });
     const code = res.choices[0].message.content;
     if (code.length > 1800) { const filePath = path.join(__dirname, "code.js"); fs.writeFileSync(filePath, code); return interaction.reply({ content: "📁 Code too long, sent as file:", files: [filePath] }); }
     return interaction.reply("```js\n" + code + "\n```");
@@ -1307,7 +1301,7 @@ client.on('interactionCreate', async (interaction) => {
     const question = interaction.options.getString('question');
     if (question.toLowerCase().includes('@everyone') || question.toLowerCase().includes('@here')) return interaction.editReply("nah not doing that 💀");
     try {
-      const res = await groq.chat.completions.create({ model: "meta-llama/llama-3.1-8b-instruct", messages: [{ role: "system", content: "You are JARVIS, a smart and chill Discord bot. Answer questions clearly and naturally. Be concise unless the question needs detail. Talk like a real person, not a textbook. Never write @everyone or @here in your reply." }, { role: "user", content: question }], temperature: 0.8, max_tokens: 600 });
+      const res = await groq.chat.completions.create({ model: "llama-3.1-8b-instant", messages: [{ role: "system", content: "You are JARVIS, a smart and chill Discord bot. Answer questions clearly and naturally. Be concise unless the question needs detail. Talk like a real person, not a textbook. Never write @everyone or @here in your reply." }, { role: "user", content: question }], temperature: 0.8, max_tokens: 600 });
       let answer = res.choices[0].message.content.replace(/@everyone/gi, '`@everyone`').replace(/@here/gi, '`@here`');
       const chunks = splitMessage(answer);
       await interaction.editReply(chunks[0]);
@@ -1323,7 +1317,7 @@ client.on('interactionCreate', async (interaction) => {
     const target = interaction.options.getUser('user');
     const subject = target.id === interaction.user.id ? 'themselves' : target.username;
     try {
-      const res = await groq.chat.completions.create({ model: 'meta-llama/llama-3.1-8b-instruct', messages: [{ role: 'system', content: 'You are a comedy roast master. Write a short, funny, witty roast. Keep it light — think comedy roast not bullying. 2-3 sentences max. No emojis.' }, { role: 'user', content: `Roast a Discord user named "${subject}". The roast was requested by "${interaction.user.username}".` }], temperature: 1.0, max_tokens: 150 });
+      const res = await groq.chat.completions.create({ model: 'llama-3.1-8b-instant', messages: [{ role: 'system', content: 'You are a comedy roast master. Write a short, funny, witty roast. Keep it light — think comedy roast not bullying. 2-3 sentences max. No emojis.' }, { role: 'user', content: `Roast a Discord user named "${subject}". The roast was requested by "${interaction.user.username}".` }], temperature: 1.0, max_tokens: 150 });
       return interaction.editReply(`🔥 **${target.username}**, ${res.choices[0].message.content}`);
     } catch (err) { console.error(err); return interaction.editReply('❌ roast machine broke rq'); }
   }
@@ -1416,7 +1410,7 @@ client.on('interactionCreate', async (interaction) => {
       const res = await axios.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 8000 });
       const text = res.data.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '').replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 3000);
       if (!text) return interaction.editReply('❌ Could not extract text from that page.');
-      const ai = await groq.chat.completions.create({ model: 'meta-llama/llama-3.1-8b-instruct', messages: [{ role: 'system', content: 'Summarize the following webpage content clearly and concisely in a few bullet points. Always mention the author, creator, or owner of the website if found anywhere in the content. No fluff.' }, { role: 'user', content: `URL: ${url}\n\nContent:\n${text}` }], max_tokens: 400 });
+      const ai = await groq.chat.completions.create({ model: 'llama-3.1-8b-instant', messages: [{ role: 'system', content: 'Summarize the following webpage content clearly and concisely in a few bullet points. Always mention the author, creator, or owner of the website if found anywhere in the content. No fluff.' }, { role: 'user', content: `URL: ${url}\n\nContent:\n${text}` }], max_tokens: 400 });
       const summary = ai.choices[0].message.content;
       const key = `${interaction.guild?.id || 'dm'}-${interaction.channelId}`;
       if (!memory[key]) memory[key] = { messages: [] };
@@ -1431,7 +1425,7 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.commandName === 'wouldyourather') {
     await interaction.deferReply();
     try {
-      const res = await groq.chat.completions.create({ model: 'meta-llama/llama-3.1-8b-instruct', messages: [{ role: 'system', content: 'Generate a fun and creative "would you rather" question with two wild options. Format exactly like:\nWould you rather...\n🅰️ Option 1\n🅱️ Option 2' }, { role: 'user', content: 'Give me a would you rather question.' }], temperature: 1.0, max_tokens: 100 });
+      const res = await groq.chat.completions.create({ model: 'llama-3.1-8b-instant', messages: [{ role: 'system', content: 'Generate a fun and creative "would you rather" question with two wild options. Format exactly like:\nWould you rather...\n🅰️ Option 1\n🅱️ Option 2' }, { role: 'user', content: 'Give me a would you rather question.' }], temperature: 1.0, max_tokens: 100 });
       return interaction.editReply(res.choices[0].message.content);
     } catch (err) { console.error(err); return interaction.editReply('❌ failed rq'); }
   }
@@ -1495,7 +1489,7 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.commandName === 'trivia') {
     await interaction.deferReply();
     try {
-      const res = await groq.chat.completions.create({ model: 'meta-llama/llama-3.1-8b-instruct', messages: [{ role: 'system', content: `Generate a multiple choice trivia question with 4 options (A, B, C, D). Format exactly like:\nQUESTION: <question text>\nA) <option>\nB) <option>\nC) <option>\nD) <option>\nANSWER: <letter>` }, { role: 'user', content: 'Give me a trivia question.' }], temperature: 1.0, max_tokens: 200 });
+      const res = await groq.chat.completions.create({ model: 'llama-3.1-8b-instant', messages: [{ role: 'system', content: `Generate a multiple choice trivia question with 4 options (A, B, C, D). Format exactly like:\nQUESTION: <question text>\nA) <option>\nB) <option>\nC) <option>\nD) <option>\nANSWER: <letter>` }, { role: 'user', content: 'Give me a trivia question.' }], temperature: 1.0, max_tokens: 200 });
       const text = res.choices[0].message.content;
       const answerMatch = text.match(/ANSWER:\s*([A-D])/i);
       const answer = answerMatch ? answerMatch[1].toUpperCase() : 'A';
