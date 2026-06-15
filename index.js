@@ -1874,8 +1874,9 @@ client.on('messageCreate', async (message) => {
   if (convo.messages.length > 20) convo.messages.shift();
 
   const guildId = message.guild?.id || 'dm';
-  const activeMode = getActiveMode(guildId);
-  const modeData = MODES[activeMode];
+const activeMode = getActiveMode(guildId);
+const modeData = MODES[activeMode];
+const now = new Date(); // 👈 add this line
 
 const system = `
 You are JARVIS, an AI assistant built into Discord by ${OWNER_NAME}. Think Tony Stark's JARVIS — sharp, composed, a little witty, never robotic.
