@@ -1708,7 +1708,7 @@ client.on('interactionCreate', async (interaction) => {
     });
   }
 
-  // ── /setuppanel (multi-panel) ──────────────────────────────────
+  // ── /setuppanel (multi-panel) ─────────────────────────────────
   if (interaction.commandName === 'setuppanel') {
     if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
     if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
