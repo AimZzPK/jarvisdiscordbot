@@ -1036,11 +1036,10 @@ const commands = [
     .setDMPermission(false),
 
 
-    new SlashCommandBuilder()
+ new SlashCommandBuilder()
   .setName('broadcast')
   .setDescription('Send a message to all servers (owner only)')
   .addStringOption(o => o.setName('message').setDescription('Message to broadcast').setRequired(true))
-  .addStringOption(o => o.setName('channel').setDescription('Channel name to target (default: general)').setRequired(false))
   .setDMPermission(true),
 ].map(c => c.toJSON());
 
@@ -1739,15 +1738,13 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.reply({ content: `✅ **${panel.title || panel.id}** panel posted!`, flags: 64 });
   }
 
-  // ── /broadcast ─────────────────────────────────────────────────
+// ── /broadcast ─────────────────────────────────────────────────
 if (interaction.commandName === 'broadcast') {
   if (!isOwner(interaction.user.id)) return interaction.reply({ content: '❌ Owner only.', flags: 64 });
 
   await interaction.deferReply({ flags: 64 });
 
   const msg = interaction.options.getString('message');
-  const targetChannelName = interaction.options.getString('channel') || 'general';
-
   const guilds = await client.guilds.fetch();
   let sent = 0, failed = 0;
 
@@ -1762,13 +1759,12 @@ if (interaction.commandName === 'broadcast') {
     try {
       const guild = await client.guilds.fetch(oauthGuild.id);
 
-      // Try to find target channel name, fallback to first sendable channel
+      // 1. Try system channel (server's default channel)
+      // 2. Fallback: first text channel JARVIS can send in
       const channel =
-        guild.channels.cache.find(
-          c => c.name.toLowerCase() === targetChannelName.toLowerCase() &&
-          c.isTextBased() &&
-          c.permissionsFor(guild.members.me)?.has('SendMessages')
-        ) ||
+        (guild.systemChannel?.permissionsFor(guild.members.me)?.has('SendMessages')
+          ? guild.systemChannel
+          : null) ||
         guild.channels.cache.find(
           c => c.isTextBased() &&
           c.permissionsFor(guild.members.me)?.has('SendMessages')
