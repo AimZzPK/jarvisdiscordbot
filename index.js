@@ -1049,7 +1049,7 @@ const commands = [
   .setDMPermission(false),
 
 
-  
+
 ].map(c => c.toJSON());
 
 // =========================
@@ -1755,7 +1755,7 @@ if (interaction.commandName === 'setbroadcastchannel') {
   dashboardConfig.broadcastChannels = dashboardConfig.broadcastChannels || {};
   dashboardConfig.broadcastChannels[interaction.guild.id] = channel.id;
   await saveDashboardConfig(dashboardConfig);
-  return interaction.reply({ content: `✅ Broadcast channel set to <#${channel.id}>. Owner announcements will appear there.`, flags: 64 });
+  return interaction.reply({ content: `✅ Broadcast channel set to <#${channel.id}>. Owner announcements will appear there.`});
 }
 
 // ── /broadcast ─────────────────────────────────────────────────
