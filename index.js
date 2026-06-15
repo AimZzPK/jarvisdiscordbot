@@ -1041,6 +1041,15 @@ const commands = [
   .setDescription('Send a message to all servers (owner only)')
   .addStringOption(o => o.setName('message').setDescription('Message to broadcast').setRequired(true))
   .setDMPermission(true),
+
+  new SlashCommandBuilder()
+  .setName('setbroadcastchannel')
+  .setDescription('Set the channel where owner broadcasts are received')
+  .addChannelOption(o => o.setName('channel').setDescription('Channel to receive broadcasts').setRequired(true))
+  .setDMPermission(false),
+
+
+  
 ].map(c => c.toJSON());
 
 // =========================
@@ -1738,6 +1747,17 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.reply({ content: `✅ **${panel.title || panel.id}** panel posted!`, flags: 64 });
   }
 
+  // ── /setbroadcastchannel ───────────────────────────────────────
+if (interaction.commandName === 'setbroadcastchannel') {
+  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+  if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
+  const channel = interaction.options.getChannel('channel');
+  dashboardConfig.broadcastChannels = dashboardConfig.broadcastChannels || {};
+  dashboardConfig.broadcastChannels[interaction.guild.id] = channel.id;
+  await saveDashboardConfig(dashboardConfig);
+  return interaction.reply({ content: `✅ Broadcast channel set to <#${channel.id}>. Owner announcements will appear there.`, flags: 64 });
+}
+
 // ── /broadcast ─────────────────────────────────────────────────
 if (interaction.commandName === 'broadcast') {
   if (!isOwner(interaction.user.id)) return interaction.reply({ content: '❌ Owner only.', flags: 64 });
@@ -1746,7 +1766,7 @@ if (interaction.commandName === 'broadcast') {
 
   const msg = interaction.options.getString('message');
   const guilds = await client.guilds.fetch();
-  let sent = 0, failed = 0;
+  let sent = 0, failed = 0, noChannel = 0;
 
   const embed = new EmbedBuilder()
     .setColor(0x5865f2)
@@ -1759,18 +1779,25 @@ if (interaction.commandName === 'broadcast') {
     try {
       const guild = await client.guilds.fetch(oauthGuild.id);
 
-      // 1. Try system channel (server's default channel)
-      // 2. Fallback: first text channel JARVIS can send in
-      const channel =
-        (guild.systemChannel?.permissionsFor(guild.members.me)?.has('SendMessages')
-          ? guild.systemChannel
-          : null) ||
-        guild.channels.cache.find(
-          c => c.isTextBased() &&
-          c.permissionsFor(guild.members.me)?.has('SendMessages')
-        );
+      // 1. Use server's configured broadcast channel
+      // 2. Fallback: system channel
+      // 3. Fallback: first sendable text channel
+      const configuredId = dashboardConfig.broadcastChannels?.[guild.id];
+      let channel = null;
 
-      if (!channel) { failed++; continue; }
+      if (configuredId) {
+        try { channel = await client.channels.fetch(configuredId); } catch {}
+      }
+
+      if (!channel) {
+        channel = (guild.systemChannel?.permissionsFor(guild.members.me)?.has('SendMessages')
+          ? guild.systemChannel : null) ||
+          guild.channels.cache.find(
+            c => c.isTextBased() && c.permissionsFor(guild.members.me)?.has('SendMessages')
+          );
+      }
+
+      if (!channel) { noChannel++; continue; }
 
       await channel.send({ embeds: [embed] });
       sent++;
@@ -1780,7 +1807,9 @@ if (interaction.commandName === 'broadcast') {
     }
   }
 
-  return interaction.editReply(`📢 Broadcast complete!\n✅ Sent to **${sent}** server(s)\n❌ Failed: **${failed}**`);
+  return interaction.editReply(
+    `📢 Broadcast complete!\n✅ Sent: **${sent}**\n❌ Failed: **${failed}**\n⚠️ No channel found: **${noChannel}**`
+  );
 }
 });
 
