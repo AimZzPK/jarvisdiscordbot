@@ -1267,6 +1267,7 @@ client.on('interactionCreate', async (interaction) => {
 /setuppanel [panel] - post a ticket panel embed
 /listpanels - list all configured panels
 /feedback /reviews /invite /portfolio /websites /dashboard
+/broadcast
 `)]
     });
   }
