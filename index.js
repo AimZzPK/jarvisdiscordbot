@@ -934,6 +934,55 @@ const commands = [
     .addUserOption(o => o.setName('user').setDescription('User to kick').setRequired(true))
     .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false))
     .setDMPermission(true),
+    new SlashCommandBuilder()
+  .setName('rps')
+  .setDescription('Play Rock Paper Scissors against JARVIS')
+  .addStringOption(o =>
+    o.setName('choice').setDescription('Your choice').setRequired(true)
+      .addChoices(
+        { name: '🪨 Rock', value: 'rock' },
+        { name: '📄 Paper', value: 'paper' },
+        { name: '✂️ Scissors', value: 'scissors' }
+      )
+  ).setDMPermission(true),
+
+new SlashCommandBuilder()
+  .setName('hangman')
+  .setDescription('Start a game of Hangman')
+  .setDMPermission(true),
+
+new SlashCommandBuilder()
+  .setName('guess')
+  .setDescription('Guess a letter or word in your active Hangman game')
+  .addStringOption(o => o.setName('letter').setDescription('A letter or the full word').setRequired(true))
+  .setDMPermission(true),
+
+new SlashCommandBuilder()
+  .setName('scramble')
+  .setDescription('Unscramble the word to win!')
+  .setDMPermission(true),
+
+new SlashCommandBuilder()
+  .setName('unscramble')
+  .setDescription('Submit your answer for the scrambled word')
+  .addStringOption(o => o.setName('answer').setDescription('Your answer').setRequired(true))
+  .setDMPermission(true),
+
+new SlashCommandBuilder()
+  .setName('numguess')
+  .setDescription('Start a number guessing game (1-100)')
+  .setDMPermission(true),
+
+new SlashCommandBuilder()
+  .setName('guessnumber')
+  .setDescription('Guess the number!')
+  .addIntegerOption(o => o.setName('number').setDescription('Your guess (1-100)').setRequired(true))
+  .setDMPermission(true),
+
+new SlashCommandBuilder()
+  .setName('tictactoe')
+  .setDescription('Play Tic Tac Toe against JARVIS')
+  .setDMPermission(true),
   new SlashCommandBuilder()
     .setName('timeout').setDescription('Timeout a user')
     .addUserOption(o => o.setName('user').setDescription('User to timeout').setRequired(true))
@@ -1142,6 +1191,102 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
+
+  // ── Tic Tac Toe buttons ────────────────────────────────────────
+if (interaction.isButton() && interaction.customId.startsWith('ttt_')) {
+  const parts = interaction.customId.split('_');
+  const ownerId = parts[1];
+  const cell = parseInt(parts[2]) - 1;
+
+  if (interaction.user.id !== ownerId) {
+    return interaction.reply({ content: '❌ This is not your game!', flags: 64 });
+  }
+
+  const gameKey = `ttt-${interaction.user.id}`;
+  const game = memory[gameKey];
+  if (!game) return interaction.reply({ content: '❌ No active game. Use `/tictactoe` to start.', flags: 64 });
+  if (game.board[cell] === 'X' || game.board[cell] === 'O') {
+    return interaction.reply({ content: '❌ That cell is already taken!', flags: 64 });
+  }
+
+  const checkWin = (board, mark) => {
+    const wins = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+    return wins.some(combo => combo.every(i => board[i] === mark));
+  };
+
+  const renderBoard = (board) => {
+    const rows = [board.slice(0,3), board.slice(3,6), board.slice(6,9)];
+    return rows.map(row => row.map(c => c === 'X' ? '❌' : c === 'O' ? '⭕' : `${c}️⃣`).join('')).join('\n');
+  };
+
+  // Player move
+  game.board[cell] = 'X';
+  if (checkWin(game.board, 'X')) {
+    delete memory[gameKey];
+    await saveMemory(memory);
+    return interaction.update({ content: `${renderBoard(game.board)}\n\n🎉 **You win!** Well played!`, components: [] });
+  }
+
+  const empty = game.board.map((v, i) => v !== 'X' && v !== 'O' ? i : null).filter(v => v !== null);
+  if (empty.length === 0) {
+    delete memory[gameKey];
+    await saveMemory(memory);
+    return interaction.update({ content: `${renderBoard(game.board)}\n\n🤝 **It's a draw!**`, components: [] });
+  }
+
+  // JARVIS move (tries to win, block, or random)
+  const findBestMove = (mark) => {
+    const wins = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+    for (const combo of wins) {
+      const marks = combo.filter(i => game.board[i] === mark);
+      const empties = combo.filter(i => game.board[i] !== 'X' && game.board[i] !== 'O');
+      if (marks.length === 2 && empties.length === 1) return empties[0];
+    }
+    return null;
+  };
+
+  const jarvisMove = findBestMove('O') ?? findBestMove('X') ?? (game.board[4] !== 'X' && game.board[4] !== 'O' ? 4 : empty[Math.floor(Math.random() * empty.length)]);
+  game.board[jarvisMove] = 'O';
+
+  if (checkWin(game.board, 'O')) {
+    delete memory[gameKey];
+    await saveMemory(memory);
+    return interaction.update({ content: `${renderBoard(game.board)}\n\n😈 **JARVIS wins!** Better luck next time.`, components: [] });
+  }
+
+  const empty2 = game.board.map((v, i) => v !== 'X' && v !== 'O' ? i : null).filter(v => v !== null);
+  if (empty2.length === 0) {
+    delete memory[gameKey];
+    await saveMemory(memory);
+    return interaction.update({ content: `${renderBoard(game.board)}\n\n🤝 **It's a draw!**`, components: [] });
+  }
+
+  await saveMemory(memory);
+
+  const row = new ActionRowBuilder().addComponents(
+    game.board.slice(0,5).map((v, i) =>
+      new ButtonBuilder()
+        .setCustomId(`ttt_${ownerId}_${i+1}`)
+        .setLabel(v === 'X' ? 'X' : v === 'O' ? 'O' : `${i+1}`)
+        .setStyle(v === 'X' ? ButtonStyle.Danger : v === 'O' ? ButtonStyle.Success : ButtonStyle.Secondary)
+        .setDisabled(v === 'X' || v === 'O')
+    )
+  );
+  const row2 = new ActionRowBuilder().addComponents(
+    game.board.slice(5).map((v, i) =>
+      new ButtonBuilder()
+        .setCustomId(`ttt_${ownerId}_${i+6}`)
+        .setLabel(v === 'X' ? 'X' : v === 'O' ? 'O' : `${i+6}`)
+        .setStyle(v === 'X' ? ButtonStyle.Danger : v === 'O' ? ButtonStyle.Success : ButtonStyle.Secondary)
+        .setDisabled(v === 'X' || v === 'O')
+    )
+  );
+
+  return interaction.update({
+    content: `❌ **Tic Tac Toe** — Your turn!\n\n${renderBoard(game.board)}`,
+    components: [row, row2]
+  });
+}
   if (!interaction.isChatInputCommand()) return;
 
   // ── /ping ──────────────────────────────────────────────────────
@@ -1823,6 +1968,207 @@ if (interaction.commandName === 'broadcast') {
   return interaction.editReply(
     `📢 Broadcast complete!\n✅ Sent: **${sent}**\n❌ Failed: **${failed}**\n⚠️ No channel found: **${noChannel}**`
   );
+}
+
+// ── /rps ───────────────────────────────────────────────────────
+if (interaction.commandName === 'rps') {
+  const choices = ['rock', 'paper', 'scissors'];
+  const emojis = { rock: '🪨', paper: '📄', scissors: '✂️' };
+  const player = interaction.options.getString('choice');
+  const jarvis = choices[Math.floor(Math.random() * choices.length)];
+  let result;
+  if (player === jarvis) result = "🤝 It's a tie!";
+  else if (
+    (player === 'rock' && jarvis === 'scissors') ||
+    (player === 'paper' && jarvis === 'rock') ||
+    (player === 'scissors' && jarvis === 'paper')
+  ) result = '🎉 You win!';
+  else result = '😈 JARVIS wins!';
+  return interaction.reply(
+    `${emojis[player]} You chose **${player}** — JARVIS chose ${emojis[jarvis]} **${jarvis}**\n${result}`
+  );
+}
+
+// ── /hangman ───────────────────────────────────────────────────
+if (interaction.commandName === 'hangman') {
+  const words = [
+    'javascript','discord','penguin','galaxy','keyboard','thunder',
+    'javascript','python','elephant','volcano','pyramid','asteroid',
+    'diamond','fortress','champion','labyrinth','paradox','quantum'
+  ];
+  const word = words[Math.floor(Math.random() * words.length)];
+  const gameKey = `hangman-${interaction.user.id}`;
+  memory[gameKey] = { word, guessed: [], wrong: 0, maxWrong: 6 };
+  await saveMemory(memory);
+  const display = word.split('').map(l => '_ ').join('');
+  const stages = ['😀','😟','😰','😨','😱','💀☠️'];
+  return interaction.reply(
+    `🎮 **Hangman started!**\n\n${stages[0]} \`${display}\`\n\nGuess with \`/guess letter:a\`\nWord has **${word.length}** letters.`
+  );
+}
+
+// ── /guess ─────────────────────────────────────────────────────
+if (interaction.commandName === 'guess') {
+  const gameKey = `hangman-${interaction.user.id}`;
+  const game = memory[gameKey];
+  if (!game) return interaction.reply({ content: '❌ No active Hangman game. Start one with `/hangman`', flags: 64 });
+  const input = interaction.options.getString('letter').toLowerCase().trim();
+  const stages = ['😀','😟','😰','😨','😱','💀','☠️'];
+
+  // Full word guess
+  if (input.length > 1) {
+    if (input === game.word) {
+      delete memory[gameKey];
+      await saveMemory(memory);
+      return interaction.reply(`✅ **Correct! You guessed the word: \`${game.word}\`!** 🎉`);
+    } else {
+      game.wrong++;
+      if (game.wrong >= game.maxWrong) {
+        delete memory[gameKey];
+        await saveMemory(memory);
+        return interaction.reply(`💀 Wrong! Game over. The word was **${game.word}**.`);
+      }
+      await saveMemory(memory);
+      return interaction.reply(`❌ Wrong word guess! ${stages[game.wrong]} Lives left: **${game.maxWrong - game.wrong}**`);
+    }
+  }
+
+  const letter = input[0];
+  if (!/[a-z]/.test(letter)) return interaction.reply({ content: '❌ Please guess a valid letter.', flags: 64 });
+  if (game.guessed.includes(letter)) return interaction.reply({ content: `⚠️ You already guessed **${letter}**!`, flags: 64 });
+  game.guessed.push(letter);
+
+  const display = game.word.split('').map(l => game.guessed.includes(l) ? l : '_').join(' ');
+  const isWon = game.word.split('').every(l => game.guessed.includes(l));
+
+  if (!game.word.includes(letter)) {
+    game.wrong++;
+    if (game.wrong >= game.maxWrong) {
+      delete memory[gameKey];
+      await saveMemory(memory);
+      return interaction.reply(`${stages[6]} **Game over!** The word was **${game.word}**.`);
+    }
+    await saveMemory(memory);
+    return interaction.reply(
+      `❌ **${letter.toUpperCase()}** is not in the word!\n\n${stages[game.wrong]} \`${display}\`\nWrong guesses: **${game.wrong}/${game.maxWrong}** | Letters tried: ${game.guessed.join(', ')}`
+    );
+  }
+
+  if (isWon) {
+    delete memory[gameKey];
+    await saveMemory(memory);
+    return interaction.reply(`✅ **You got it! The word was \`${game.word}\`!** 🎉`);
+  }
+
+  await saveMemory(memory);
+  return interaction.reply(
+    `✅ **${letter.toUpperCase()}** is in the word!\n\n😀 \`${display}\`\nWrong guesses: **${game.wrong}/${game.maxWrong}** | Letters tried: ${game.guessed.join(', ')}`
+  );
+}
+
+// ── /scramble ──────────────────────────────────────────────────
+if (interaction.commandName === 'scramble') {
+  const words = [
+    'javascript','discord','penguin','galaxy','keyboard','thunder',
+    'python','elephant','volcano','pyramid','asteroid','diamond',
+    'fortress','champion','labyrinth','paradox','quantum','jupiter'
+  ];
+  const word = words[Math.floor(Math.random() * words.length)];
+  const scrambled = word.split('').sort(() => Math.random() - 0.5).join('');
+  const gameKey = `scramble-${interaction.user.id}`;
+  memory[gameKey] = { word, startTime: Date.now() };
+  await saveMemory(memory);
+  return interaction.reply(
+    `🔀 **Word Scramble!**\n\nUnscramble this: \`${scrambled.toUpperCase()}\`\n\nUse \`/unscramble answer:yourword\` to answer!\n_(${word.length} letters)_`
+  );
+}
+
+// ── /unscramble ────────────────────────────────────────────────
+if (interaction.commandName === 'unscramble') {
+  const gameKey = `scramble-${interaction.user.id}`;
+  const game = memory[gameKey];
+  if (!game) return interaction.reply({ content: '❌ No active scramble game. Start one with `/scramble`', flags: 64 });
+  const answer = interaction.options.getString('answer').toLowerCase().trim();
+  const timeTaken = ((Date.now() - game.startTime) / 1000).toFixed(1);
+  delete memory[gameKey];
+  await saveMemory(memory);
+  if (answer === game.word) {
+    return interaction.reply(`✅ **Correct!** The word was \`${game.word}\` — solved in **${timeTaken}s** 🎉`);
+  }
+  return interaction.reply(`❌ Wrong! The word was **${game.word}**. Better luck next time!`);
+}
+
+// ── /numguess ──────────────────────────────────────────────────
+if (interaction.commandName === 'numguess') {
+  const gameKey = `numguess-${interaction.user.id}`;
+  const number = Math.floor(Math.random() * 100) + 1;
+  memory[gameKey] = { number, attempts: 0, maxAttempts: 7 };
+  await saveMemory(memory);
+  return interaction.reply(
+    `🔢 **Number Guessing Game!**\n\nI'm thinking of a number between **1 and 100**.\nYou have **7 attempts**. Use \`/guessnumber number:50\` to guess!`
+  );
+}
+
+// ── /guessnumber ───────────────────────────────────────────────
+if (interaction.commandName === 'guessnumber') {
+  const gameKey = `numguess-${interaction.user.id}`;
+  const game = memory[gameKey];
+  if (!game) return interaction.reply({ content: '❌ No active game. Start one with `/numguess`', flags: 64 });
+  const guess = interaction.options.getInteger('number');
+  game.attempts++;
+  const attemptsLeft = game.maxAttempts - game.attempts;
+
+  if (guess === game.number) {
+    delete memory[gameKey];
+    await saveMemory(memory);
+    return interaction.reply(`🎉 **Correct!** The number was **${game.number}**! You got it in **${game.attempts}** attempt(s)!`);
+  }
+  if (attemptsLeft <= 0) {
+    delete memory[gameKey];
+    await saveMemory(memory);
+    return interaction.reply(`💀 **Game over!** The number was **${game.number}**. You ran out of attempts!`);
+  }
+
+  const hint = guess < game.number ? '📈 Too low!' : '📉 Too high!';
+  await saveMemory(memory);
+  return interaction.reply(`${hint} Attempts left: **${attemptsLeft}** — keep guessing with \`/guessnumber\``);
+}
+
+// ── /tictactoe ─────────────────────────────────────────────────
+if (interaction.commandName === 'tictactoe') {
+  const gameKey = `ttt-${interaction.user.id}`;
+  memory[gameKey] = {
+    board: ['1','2','3','4','5','6','7','8','9'],
+    turn: 'player'
+  };
+  await saveMemory(memory);
+
+  const renderBoard = (board) => {
+    const rows = [board.slice(0,3), board.slice(3,6), board.slice(6,9)];
+    return rows.map(row => row.map(c => c === 'X' ? '❌' : c === 'O' ? '⭕' : `${c}️⃣`).join('')).join('\n');
+  };
+
+  const row = new ActionRowBuilder().addComponents(
+    [1,2,3,4,5,6,7,8,9].map(n =>
+      new ButtonBuilder()
+        .setCustomId(`ttt_${interaction.user.id}_${n}`)
+        .setLabel(`${n}`)
+        .setStyle(ButtonStyle.Secondary)
+    ).slice(0, 5)
+  );
+  const row2 = new ActionRowBuilder().addComponents(
+    [1,2,3,4,5,6,7,8,9].map(n =>
+      new ButtonBuilder()
+        .setCustomId(`ttt_${interaction.user.id}_${n}`)
+        .setLabel(`${n}`)
+        .setStyle(ButtonStyle.Secondary)
+    ).slice(5)
+  );
+
+  return interaction.reply({
+    content: `❌ **Tic Tac Toe** — You are ❌, JARVIS is ⭕\n\n${renderBoard(memory[gameKey].board)}\n\nPick a square:`,
+    components: [row, row2]
+  });
 }
 });
 
