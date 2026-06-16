@@ -292,6 +292,26 @@ client.on('guildMemberAdd', async (member) => {
     )
     .setFooter({ text: `JARVIS Logs • ${member.guild.name}` }).setTimestamp();
   await sendLog(member.guild.id, embed);
+
+  // ── Welcome message ───────────────────────────────────────────
+  const welcomeCfg = dashboardConfig.welcome?.[member.guild.id];
+  if (welcomeCfg?.channelId) {
+    try {
+      const welcomeChannel = await client.channels.fetch(welcomeCfg.channelId);
+      const msg = welcomeCfg.message
+        ? welcomeCfg.message.replace('{user}', `<@${member.id}>`).replace('{server}', member.guild.name)
+        : `👋 Welcome <@${member.id}> to **${member.guild.name}**! We're glad to have you here.`;
+      const welcomeEmbed = new EmbedBuilder()
+        .setColor(0x57f287)
+        .setDescription(msg)
+        .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
+        .setFooter({ text: member.guild.name })
+        .setTimestamp();
+      await welcomeChannel.send({ embeds: [welcomeEmbed] });
+    } catch (err) {
+      console.error('[Welcome] Failed to send welcome message:', err.message);
+    }
+  }
 });
 
 client.on('guildMemberRemove', async (member) => {
@@ -1099,7 +1119,12 @@ new SlashCommandBuilder()
   .addChannelOption(o => o.setName('channel').setDescription('Channel to receive broadcasts').setRequired(true))
   .setDMPermission(false),
 
-
+new SlashCommandBuilder()
+  .setName('setwelcome')
+  .setDescription('Set the welcome channel for new members')
+  .addChannelOption(o => o.setName('channel').setDescription('Channel to send welcome messages').setRequired(true))
+  .addStringOption(o => o.setName('message').setDescription('Custom message (use {user} and {server} as placeholders)').setRequired(false))
+  .setDMPermission(false),
 
 ].map(c => c.toJSON());
 
@@ -1388,6 +1413,35 @@ if (interaction.isButton() && interaction.customId.startsWith('ttt_')) {
       return interaction.reply({ embeds: [embed] });
     } catch (err) { console.error(err); return interaction.reply({ content: "❌ Failed to load reviews", flags: 64 }); }
   }
+
+  // ── /setwelcome ────────────────────────────────────────────────
+if (interaction.commandName === 'setwelcome') {
+  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+  if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
+
+  const channel = interaction.options.getChannel('channel');
+  const customMsg = interaction.options.getString('message') || null;
+
+  dashboardConfig.welcome = dashboardConfig.welcome || {};
+  dashboardConfig.welcome[interaction.guild.id] = { channelId: channel.id, message: customMsg };
+  await saveDashboardConfig(dashboardConfig);
+
+  const preview = customMsg
+    ? customMsg.replace('{user}', `<@${interaction.user.id}>`).replace('{server}', interaction.guild.name)
+    : `👋 Welcome <@${interaction.user.id}> to **${interaction.guild.name}**! We're glad to have you.`;
+
+  return interaction.reply({
+    embeds: [new EmbedBuilder()
+      .setColor(0x57f287)
+      .setTitle('✅ Welcome Channel Set')
+      .addFields(
+        { name: 'Channel', value: `<#${channel.id}>` },
+        { name: 'Message preview', value: preview }
+      )
+      .setFooter({ text: 'Use {user} and {server} as placeholders in your message' })
+    ]
+  });
+}
 
   // ── /help ──────────────────────────────────────────────────────
   if (interaction.commandName === 'help') {
