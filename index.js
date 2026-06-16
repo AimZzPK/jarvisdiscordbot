@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 const { EmbedBuilder, AuditLogEvent } = require('discord.js');
+const { Client, GatewayIntentBits, ActivityType } = require("discord.js");
 
 const {
   Client,
@@ -1068,6 +1069,16 @@ async function deployCommands() {
 client.once('clientReady', async () => {
   await loadMemory();
   await loadDashboardConfig();
+
+  client.user.setPresence({
+  activities: [
+    {
+      name: "Join discord.gg/5NtU3eFBrM",
+    }
+  ],
+  status: "online"
+});
+
   console.log(`ONLINE 🔥 als ${client.user.tag}`);
   await deployCommands();
   setInterval(loadDashboardConfig, 15_000);
