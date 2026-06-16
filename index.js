@@ -1,7 +1,6 @@
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
-const { EmbedBuilder, AuditLogEvent } = require('discord.js');
 
 const {
   Client,
