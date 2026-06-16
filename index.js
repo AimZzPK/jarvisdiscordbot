@@ -2,7 +2,6 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 const { EmbedBuilder, AuditLogEvent } = require('discord.js');
-const { Client, GatewayIntentBits, ActivityType } = require("discord.js");
 
 const {
   Client,
@@ -13,7 +12,10 @@ const {
   SlashCommandBuilder,
   ActionRowBuilder,
   ButtonBuilder,
-  ButtonStyle
+  ButtonStyle,
+  EmbedBuilder,
+  AuditLogEvent,
+  ActivityType
 } = require('discord.js');
 
 const OpenAI = require('openai');
