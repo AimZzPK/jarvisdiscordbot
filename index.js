@@ -304,9 +304,10 @@ client.on('guildMemberAdd', async (member) => {
       const welcomeEmbed = new EmbedBuilder()
         .setColor(0x57f287)
         .setDescription(msg)
-        .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
+        .setThumbnail(member.user.displayAvatarURL({ dynamic: true })) // avatar stays small, top-right
         .setFooter({ text: member.guild.name })
         .setTimestamp();
+      if (welcomeCfg.imageUrl) welcomeEmbed.setImage(welcomeCfg.imageUrl); // big banner below the text
       await welcomeChannel.send({ embeds: [welcomeEmbed] });
     } catch (err) {
       console.error('[Welcome] Failed to send welcome message:', err.message);
@@ -1124,6 +1125,7 @@ new SlashCommandBuilder()
   .setDescription('Set the welcome channel for new members')
   .addChannelOption(o => o.setName('channel').setDescription('Channel to send welcome messages').setRequired(true))
   .addStringOption(o => o.setName('message').setDescription('Custom message (use {user} and {server} as placeholders)').setRequired(false))
+  .addStringOption(o => o.setName('image').setDescription('Image URL to show as a banner on the welcome embed').setRequired(false))
   .setDMPermission(false),
 
 ].map(c => c.toJSON());
@@ -1421,26 +1423,31 @@ if (interaction.commandName === 'setwelcome') {
 
   const channel = interaction.options.getChannel('channel');
   const customMsg = interaction.options.getString('message') || null;
+  const imageUrl = interaction.options.getString('image') || null;
+
+  if (imageUrl && !/^https?:\/\/.+\.(png|jpe?g|gif|webp)(\?.*)?$/i.test(imageUrl)) {
+    return interaction.reply({ content: '❌ That doesn\'t look like a valid image URL (must end in .png, .jpg, .jpeg, .gif, or .webp).', flags: 64 });
+  }
 
   dashboardConfig.welcome = dashboardConfig.welcome || {};
-  dashboardConfig.welcome[interaction.guild.id] = { channelId: channel.id, message: customMsg };
+  dashboardConfig.welcome[interaction.guild.id] = { channelId: channel.id, message: customMsg, imageUrl };
   await saveDashboardConfig(dashboardConfig);
 
   const preview = customMsg
     ? customMsg.replace('{user}', `<@${interaction.user.id}>`).replace('{server}', interaction.guild.name)
     : `👋 Welcome <@${interaction.user.id}> to **${interaction.guild.name}**! We're glad to have you.`;
 
-  return interaction.reply({
-    embeds: [new EmbedBuilder()
-      .setColor(0x57f287)
-      .setTitle('✅ Welcome Channel Set')
-      .addFields(
-        { name: 'Channel', value: `<#${channel.id}>` },
-        { name: 'Message preview', value: preview }
-      )
-      .setFooter({ text: 'Use {user} and {server} as placeholders in your message' })
-    ]
-  });
+  const previewEmbed = new EmbedBuilder()
+    .setColor(0x57f287)
+    .setTitle('✅ Welcome Channel Set')
+    .setDescription(preview)
+    .setThumbnail(interaction.user.displayAvatarURL({ dynamic: true }))
+    .addFields({ name: 'Channel', value: `<#${channel.id}>` })
+    .setFooter({ text: 'Use {user} and {server} as placeholders in your message' });
+
+  if (imageUrl) previewEmbed.setImage(imageUrl);
+
+  return interaction.reply({ embeds: [previewEmbed] });
 }
 
   // ── /help ──────────────────────────────────────────────────────
