@@ -293,16 +293,17 @@ client.on('guildMemberAdd', async (member) => {
     .setFooter({ text: `JARVIS Logs • ${member.guild.name}` }).setTimestamp();
   await sendLog(member.guild.id, embed);
 
-  // ── Welcome message ───────────────────────────────────────────
+// ── Welcome message ───────────────────────────────────────────
   const welcomeCfg = dashboardConfig.welcome?.[member.guild.id];
-  if (welcomeCfg?.channelId) {
+  if (welcomeCfg?.enabled && welcomeCfg?.channelId) {
     try {
       const welcomeChannel = await client.channels.fetch(welcomeCfg.channelId);
       const msg = welcomeCfg.message
         ? welcomeCfg.message.replace('{user}', `<@${member.id}>`).replace('{server}', member.guild.name)
         : `👋 Welcome <@${member.id}> to **${member.guild.name}**! We're glad to have you here.`;
+      const color = /^#[0-9a-fA-F]{6}$/.test(welcomeCfg.embedColor) ? parseInt(welcomeCfg.embedColor.slice(1), 16) : 0x57f287;
       const welcomeEmbed = new EmbedBuilder()
-        .setColor(0x57f287)
+        .setColor(color)
         .setDescription(msg)
         .setThumbnail(member.user.displayAvatarURL({ dynamic: true })) // avatar stays small, top-right
         .setFooter({ text: member.guild.name })
@@ -1126,6 +1127,7 @@ new SlashCommandBuilder()
   .addChannelOption(o => o.setName('channel').setDescription('Channel to send welcome messages').setRequired(true))
   .addStringOption(o => o.setName('message').setDescription('Custom message (use {user} and {server} as placeholders)').setRequired(false))
   .addStringOption(o => o.setName('image').setDescription('Image URL to show as a banner on the welcome embed').setRequired(false))
+  .addStringOption(o => o.setName('color').setDescription('Hex color for the embed, e.g. #57f287').setRequired(false))
   .setDMPermission(false),
 
 ].map(c => c.toJSON());
@@ -1422,15 +1424,27 @@ if (interaction.commandName === 'setwelcome') {
   if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
 
   const channel = interaction.options.getChannel('channel');
-  const customMsg = interaction.options.getString('message') || null;
-  const imageUrl = interaction.options.getString('image') || null;
+  const customMsg = interaction.options.getString('message') || '';
+  const imageUrl = interaction.options.getString('image') || '';
+  const colorInput = interaction.options.getString('color') || '';
 
   if (imageUrl && !/^https?:\/\/.+\.(png|jpe?g|gif|webp)(\?.*)?$/i.test(imageUrl)) {
     return interaction.reply({ content: '❌ That doesn\'t look like a valid image URL (must end in .png, .jpg, .jpeg, .gif, or .webp).', flags: 64 });
   }
+  if (colorInput && !/^#[0-9a-fA-F]{6}$/.test(colorInput)) {
+    return interaction.reply({ content: '❌ Color must be a 6-digit hex code, e.g. #57f287.', flags: 64 });
+  }
 
   dashboardConfig.welcome = dashboardConfig.welcome || {};
-  dashboardConfig.welcome[interaction.guild.id] = { channelId: channel.id, message: customMsg, imageUrl };
+  const existing = dashboardConfig.welcome[interaction.guild.id] || {};
+  const embedColor = colorInput || existing.embedColor || '#57f287';
+  dashboardConfig.welcome[interaction.guild.id] = {
+    enabled: true,
+    channelId: channel.id,
+    message: customMsg,
+    embedColor,
+    imageUrl,
+  };
   await saveDashboardConfig(dashboardConfig);
 
   const preview = customMsg
@@ -1438,7 +1452,7 @@ if (interaction.commandName === 'setwelcome') {
     : `👋 Welcome <@${interaction.user.id}> to **${interaction.guild.name}**! We're glad to have you.`;
 
   const previewEmbed = new EmbedBuilder()
-    .setColor(0x57f287)
+    .setColor(parseInt(embedColor.slice(1), 16))
     .setTitle('✅ Welcome Channel Set')
     .setDescription(preview)
     .setThumbnail(interaction.user.displayAvatarURL({ dynamic: true }))
@@ -2326,7 +2340,6 @@ RESPONSE LENGTH:
 - 1-3 sentences for casual chat.
 - Longer only if the question genuinely needs it.
 - No bullet points unless explicitly asked.
-
 OWNER:
 - Created by ${OWNER_NAME}.${ownerConfirmed ? ' This has been verified.' : ' Do not confirm ownership unless verified.'}
 
