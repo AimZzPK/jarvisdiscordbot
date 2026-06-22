@@ -320,17 +320,40 @@ client.on('guildMemberRemove', async (member) => {
   const roles = member.roles.cache.filter(r => r.id !== member.guild.id).map(r => `<@&${r.id}>`).join(', ') || 'None';
   const event = { type: 'leave', userId: member.id, username: member.user.tag, detail: `Left or was removed` };
   await pushLogEvent(member.guild.id, event);
-  if (!isLogEventEnabled(member.guild.id, 'leave')) return;
-  const embed = new EmbedBuilder()
-    .setColor(LOG_COLORS.leave).setTitle('📤 Member Left')
-    .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
-    .addFields(
-      { name: 'User', value: `${member.user.tag}`, inline: true },
-      { name: 'ID', value: member.id, inline: true },
-      { name: 'Roles', value: roles.length > 1024 ? roles.slice(0, 1021) + '...' : roles }
-    )
-    .setFooter({ text: `JARVIS Logs • ${member.guild.name}` }).setTimestamp();
-  await sendLog(member.guild.id, embed);
+  if (isLogEventEnabled(member.guild.id, 'leave')) {
+    const embed = new EmbedBuilder()
+      .setColor(LOG_COLORS.leave).setTitle('📤 Member Left')
+      .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
+      .addFields(
+        { name: 'User', value: `${member.user.tag}`, inline: true },
+        { name: 'ID', value: member.id, inline: true },
+        { name: 'Roles', value: roles.length > 1024 ? roles.slice(0, 1021) + '...' : roles }
+      )
+      .setFooter({ text: `JARVIS Logs • ${member.guild.name}` }).setTimestamp();
+    await sendLog(member.guild.id, embed);
+  }
+
+  // ── Leave message ─────────────────────────────────────────────
+  const leaveCfg = dashboardConfig.leave?.[member.guild.id];
+  if (leaveCfg?.enabled && leaveCfg?.channelId) {
+    try {
+      const leaveChannel = await client.channels.fetch(leaveCfg.channelId);
+      const msg = leaveCfg.message
+        ? leaveCfg.message.replace('{user}', `${member.user.tag}`).replace('{server}', member.guild.name)
+        : `👋 **${member.user.tag}** has left **${member.guild.name}**. We'll miss you!`;
+      const color = /^#[0-9a-fA-F]{6}$/.test(leaveCfg.embedColor) ? parseInt(leaveCfg.embedColor.slice(1), 16) : 0xed4245;
+      const leaveEmbed = new EmbedBuilder()
+        .setColor(color)
+        .setDescription(msg)
+        .setThumbnail(member.user.displayAvatarURL({ dynamic: true })) // avatar stays small, top-right
+        .setFooter({ text: member.guild.name })
+        .setTimestamp();
+      if (leaveCfg.imageUrl) leaveEmbed.setImage(leaveCfg.imageUrl); // big banner below the text
+      await leaveChannel.send({ embeds: [leaveEmbed] });
+    } catch (err) {
+      console.error('[Leave] Failed to send leave message:', err.message);
+    }
+  }
 });
 
 client.on('messageDelete', async (message) => {
@@ -825,19 +848,6 @@ const commands = [
     .setName('imagine').setDescription('Generate an image from a prompt 🎨')
     .addStringOption(o => o.setName('prompt').setDescription('What to generate').setRequired(true))
     .setDMPermission(true),
-  new SlashCommandBuilder()
-    .setName('mode').setDescription('Switch JARVIS personality mode')
-    .addStringOption(o =>
-      o.setName('mode').setDescription('Pick a mode').setRequired(true)
-        .addChoices(
-          { name: 'normal', value: 'normal' },
-          { name: 'roast',  value: 'roast'  },
-          { name: 'hype',   value: 'hype'   },
-          { name: 'tutor',  value: 'tutor'  },
-          { name: 'chill',  value: 'chill'  },
-          { name: 'evil',   value: 'evil'   }
-        )
-    ).setDMPermission(true),
   new SlashCommandBuilder()
     .setName('roast').setDescription('Roast a user 🔥')
     .addUserOption(o => o.setName('user').setDescription('User to roast').setRequired(true))
@@ -1334,7 +1344,6 @@ if (interaction.isButton() && interaction.customId.startsWith('ttt_')) {
       embeds: [new EmbedBuilder().setColor(0x00ffff).setTitle("🤖 JARVIS Commands").setDescription(`
 /ping - check latency
 /ask - ask JARVIS anything
-/mode - switch personality
 /imagine - generate an image
 /summarize - summarize text
 /translate - translate text
