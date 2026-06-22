@@ -643,88 +643,6 @@ function splitMessage(text, maxLength = 1900) {
   return chunks;
 }
 
-// =========================
-// VOICE AI  (unchanged)
-// =========================
-const activeListeners = new Map();
-
-async function generateSpeech(text) {
-  try {
-    const encoded = encodeURIComponent(text.slice(0, 200));
-    const url = `https://translate.google.com/translate_tts?ie=UTF-8&tl=en&client=tw-ob&q=${encoded}`;
-    const res = await axios.get(url, { responseType: 'arraybuffer', headers: { 'User-Agent': 'Mozilla/5.0' } });
-    const filePath = path.join(__dirname, `tts-${Date.now()}.mp3`);
-    fs.writeFileSync(filePath, Buffer.from(res.data));
-    return filePath;
-  } catch (err) { console.error('[Voice] TTS failed:', err.message); return null; }
-}
-
-async function playAudioFile(connection, filePath) {
-  return new Promise((resolve) => {
-    const player = createAudioPlayer();
-    const resource = createAudioResource(filePath);
-    connection.subscribe(player);
-    player.play(resource);
-    player.on(AudioPlayerStatus.Idle, () => { try { fs.unlinkSync(filePath); } catch {} resolve(); });
-    player.on('error', (err) => { console.error('[Voice] Player error:', err.message); try { fs.unlinkSync(filePath); } catch {} resolve(); });
-  });
-}
-
-function listenToUser(connection, userId, guildId, member) {
-  if (activeListeners.get(guildId)?.has(userId)) return;
-  if (!activeListeners.has(guildId)) activeListeners.set(guildId, new Set());
-  activeListeners.get(guildId).add(userId);
-  const receiver = connection.receiver;
-  receiver.speaking.on('start', (speakingUserId) => {
-    if (speakingUserId !== userId) return;
-    const audioStream = receiver.subscribe(userId, { end: { behavior: EndBehaviorType.AfterSilence, duration: 1000 } });
-    const decoder = new prism.opus.Decoder({ rate: 16000, channels: 1, frameSize: 960 });
-    const filePath = path.join(__dirname, `voice-${userId}-${Date.now()}.pcm`);
-    const fileStream = fs.createWriteStream(filePath);
-    audioStream.pipe(decoder).pipe(fileStream);
-    audioStream.once('close', async () => {
-      fileStream.end();
-      await new Promise(r => setTimeout(r, 200));
-      try { const stats = fs.statSync(filePath); if (stats.size < 4000) { fs.unlinkSync(filePath); return; } } catch { return; }
-      const wavPath = filePath.replace('.pcm', '.wav');
-      try {
-        execSync(`"${ffmpegPath}" -f s16le -ar 16000 -ac 1 -i "${filePath}" "${wavPath}"`);
-        fs.unlinkSync(filePath);
-      } catch (err) { console.error('[Voice] FFmpeg conversion failed:', err.message); try { fs.unlinkSync(filePath); } catch {} return; }
-      let transcript;
-      try {
-        const form = new FormData();
-        form.append('file', fs.createReadStream(wavPath), { filename: 'audio.wav' });
-        form.append('model', 'whisper-large-v3');
-        const res = await axios.post('https://api.groq.com/openai/v1/audio/transcriptions', form, {
-          headers: { ...form.getHeaders(), Authorization: `Bearer ${process.env.GROQ_API_KEY}` }
-        });
-        transcript = res.data.text?.trim();
-        try { fs.unlinkSync(wavPath); } catch {}
-      } catch (err) { console.error('[Voice] Transcription failed:', err.message); try { fs.unlinkSync(wavPath); } catch {} return; }
-      if (!transcript || transcript.length < 2) return;
-      console.log(`[Voice] ${member.user.username}: ${transcript}`);
-      const activeMode = getActiveMode(guildId);
-      const modeData = MODES[activeMode];
-      let aiResponse;
-      try {
-        const res = await groq.chat.completions.create({
-          model: 'llama-3.1-8b-instant',
-          messages: [
-            { role: 'system', content: `${modeData.prompt}\nYou are JARVIS in a Discord voice channel. Keep replies SHORT — 1-3 sentences max. No markdown, no bullet points, no emojis. Speak naturally out loud.` },
-            { role: 'user', content: `${member.user.username} said: ${transcript}` }
-          ],
-          temperature: 0.85, max_tokens: 150,
-        });
-        aiResponse = res.choices[0].message.content.replace(/[*_`#@]/g, '');
-      } catch (err) { console.error('[Voice] AI failed:', err.message); return; }
-      if (!aiResponse) return;
-      console.log(`[Voice] JARVIS: ${aiResponse}`);
-      const ttsFile = await generateSpeech(aiResponse);
-      if (ttsFile) await playAudioFile(connection, ttsFile);
-    });
-  });
-}
 
 // =========================
 // ── TICKET HELPERS ────────
@@ -1121,15 +1039,6 @@ new SlashCommandBuilder()
   .addChannelOption(o => o.setName('channel').setDescription('Channel to receive broadcasts').setRequired(true))
   .setDMPermission(false),
 
-new SlashCommandBuilder()
-  .setName('setwelcome')
-  .setDescription('Set the welcome channel for new members')
-  .addChannelOption(o => o.setName('channel').setDescription('Channel to send welcome messages').setRequired(true))
-  .addStringOption(o => o.setName('message').setDescription('Custom message (use {user} and {server} as placeholders)').setRequired(false))
-  .addStringOption(o => o.setName('image').setDescription('Image URL to show as a banner on the welcome embed').setRequired(false))
-  .addStringOption(o => o.setName('color').setDescription('Hex color for the embed, e.g. #57f287').setRequired(false))
-  .setDMPermission(false),
-
 ].map(c => c.toJSON());
 
 // =========================
@@ -1418,51 +1327,6 @@ if (interaction.isButton() && interaction.customId.startsWith('ttt_')) {
     } catch (err) { console.error(err); return interaction.reply({ content: "❌ Failed to load reviews", flags: 64 }); }
   }
 
-  // ── /setwelcome ────────────────────────────────────────────────
-if (interaction.commandName === 'setwelcome') {
-  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
-  if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
-
-  const channel = interaction.options.getChannel('channel');
-  const customMsg = interaction.options.getString('message') || '';
-  const imageUrl = interaction.options.getString('image') || '';
-  const colorInput = interaction.options.getString('color') || '';
-
-  if (imageUrl && !/^https?:\/\/.+\.(png|jpe?g|gif|webp)(\?.*)?$/i.test(imageUrl)) {
-    return interaction.reply({ content: '❌ That doesn\'t look like a valid image URL (must end in .png, .jpg, .jpeg, .gif, or .webp).', flags: 64 });
-  }
-  if (colorInput && !/^#[0-9a-fA-F]{6}$/.test(colorInput)) {
-    return interaction.reply({ content: '❌ Color must be a 6-digit hex code, e.g. #57f287.', flags: 64 });
-  }
-
-  dashboardConfig.welcome = dashboardConfig.welcome || {};
-  const existing = dashboardConfig.welcome[interaction.guild.id] || {};
-  const embedColor = colorInput || existing.embedColor || '#57f287';
-  dashboardConfig.welcome[interaction.guild.id] = {
-    enabled: true,
-    channelId: channel.id,
-    message: customMsg,
-    embedColor,
-    imageUrl,
-  };
-  await saveDashboardConfig(dashboardConfig);
-
-  const preview = customMsg
-    ? customMsg.replace('{user}', `<@${interaction.user.id}>`).replace('{server}', interaction.guild.name)
-    : `👋 Welcome <@${interaction.user.id}> to **${interaction.guild.name}**! We're glad to have you.`;
-
-  const previewEmbed = new EmbedBuilder()
-    .setColor(parseInt(embedColor.slice(1), 16))
-    .setTitle('✅ Welcome Channel Set')
-    .setDescription(preview)
-    .setThumbnail(interaction.user.displayAvatarURL({ dynamic: true }))
-    .addFields({ name: 'Channel', value: `<#${channel.id}>` })
-    .setFooter({ text: 'Use {user} and {server} as placeholders in your message' });
-
-  if (imageUrl) previewEmbed.setImage(imageUrl);
-
-  return interaction.reply({ embeds: [previewEmbed] });
-}
 
   // ── /help ──────────────────────────────────────────────────────
   if (interaction.commandName === 'help') {
@@ -1661,17 +1525,6 @@ if (interaction.commandName === 'setwelcome') {
     return interaction.reply(`🎱 **Q: ${question}**\n${responses[Math.floor(Math.random() * responses.length)]}`);
   }
 
-  // ── /mode ──────────────────────────────────────────────────────
-  if (interaction.commandName === 'mode') {
-    const selectedMode = interaction.options.getString('mode');
-    const guildId = interaction.guild?.id || 'dm';
-    dashboardConfig.modes = dashboardConfig.modes || {};
-    dashboardConfig.modes[guildId] = selectedMode;
-    saveDashboardConfig(dashboardConfig);
-    const m = MODES[selectedMode];
-    return interaction.reply(`${m.emoji} Switched to **${m.label}** — ${getModeDescription(selectedMode)}`);
-  }
-
   // ── /browse ────────────────────────────────────────────────────
   if (interaction.commandName === 'browse') {
     await interaction.deferReply();
@@ -1841,30 +1694,6 @@ if (interaction.commandName === 'setwelcome') {
       const imageUrl = `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=1024&nologo=true&seed=${Math.floor(Math.random() * 99999)}`;
       return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x9b59b6).setTitle('🎨 Image Generated').setDescription(`**Prompt:** ${prompt}`).setImage(imageUrl).setFooter({ text: 'JARVIS AI • Powered by Pollinations.ai' })] });
     } catch (err) { console.error(err); return interaction.editReply('❌ Failed to generate image rq, try again'); }
-  }
-
-  // ── /join ──────────────────────────────────────────────────────
-  if (interaction.commandName === 'join') {
-    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
-    const member = await interaction.guild.members.fetch(interaction.user.id);
-    const voiceChannel = member.voice.channel;
-    if (!voiceChannel) return interaction.reply({ content: '❌ Join a voice channel first.', flags: 64 });
-    if (getVoiceConnection(interaction.guild.id)) return interaction.reply({ content: '⚠️ Already in a voice channel. Use `/leave` first.', flags: 64 });
-    const connection = joinVoiceChannel({ channelId: voiceChannel.id, guildId: interaction.guild.id, adapterCreator: interaction.guild.voiceAdapterCreator, selfDeaf: false, selfMute: false });
-    await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
-    for (const [, vcMember] of voiceChannel.members) { if (vcMember.user.bot) continue; listenToUser(connection, vcMember.id, interaction.guild.id, vcMember); }
-    connection.on(VoiceConnectionStatus.Disconnected, async () => { try { await Promise.race([entersState(connection, VoiceConnectionStatus.Signalling, 5_000), entersState(connection, VoiceConnectionStatus.Connecting, 5_000)]); } catch { connection.destroy(); activeListeners.delete(interaction.guild.id); } });
-    return interaction.reply(`🎙️ Joined **${voiceChannel.name}**! Talk to me.`);
-  }
-
-  // ── /leave ─────────────────────────────────────────────────────
-  if (interaction.commandName === 'leave') {
-    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
-    const connection = getVoiceConnection(interaction.guild.id);
-    if (!connection) return interaction.reply({ content: "❌ I'm not in a voice channel.", flags: 64 });
-    connection.destroy();
-    activeListeners.delete(interaction.guild.id);
-    return interaction.reply('👋 Left the voice channel.');
   }
 
   // ── /setticketcategory ─────────────────────────────────────────
@@ -2335,6 +2164,7 @@ RULES:
 - Don't repeat usernames back unless needed.
 - Respond ONLY to the latest message, using conversation history for context only.
 - Understand slang naturally — "wsp"/"wsg" = what's up, "wyd" = what you doing, "fr" = for real. Just respond naturally, don't point it out.
+- Don't ever use slang.
 
 RESPONSE LENGTH:
 - 1-3 sentences for casual chat.
