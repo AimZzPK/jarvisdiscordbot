@@ -2189,7 +2189,7 @@ if (interaction.commandName === 'setbroadcastchannel') {
 if (interaction.commandName === 'broadcast') {
   if (!isOwner(interaction.user.id)) return interaction.reply({ content: '❌ Owner only.', flags: 64 });
 
-  await interaction.deferReply({ flags: 64 });
+  await interaction.deferReply({});
 
   const msg = interaction.options.getString('message');
   const guilds = await client.guilds.fetch();
