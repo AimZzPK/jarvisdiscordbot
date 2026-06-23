@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const activeGiveaways = new Map(); // messageId -> timeout
 const axios = require('axios');
 
 const {
@@ -666,6 +667,70 @@ function splitMessage(text, maxLength = 1900) {
   return chunks;
 }
 
+async function endGiveaway(channel, messageId, forced = false) {
+  try {
+    const msg = await channel.messages.fetch(messageId);
+    if (!msg) return;
+
+    const key = `giveaway-${messageId}`;
+    const data = await redis.get(key);
+    if (!data) return;
+
+    const giveaway = typeof data === 'string' ? JSON.parse(data) : data;
+    if (giveaway.ended && !forced) return;
+
+    giveaway.ended = true;
+    await redis.set(key, JSON.stringify(giveaway));
+
+    const entries = giveaway.entries || [];
+    const winnerCount = giveaway.winnerCount || 1;
+
+    if (entries.length === 0) {
+      const endEmbed = new EmbedBuilder()
+        .setColor(0xed4245)
+        .setTitle('🎉 Giveaway Ended')
+        .setDescription(`**Prize:** ${giveaway.prize}\n\n❌ No one entered the giveaway.`)
+        .setFooter({ text: 'JARVIS Giveaways • No winners' })
+        .setTimestamp();
+      await msg.edit({ embeds: [endEmbed], components: [] });
+      await channel.send(`😔 No one entered the **${giveaway.prize}** giveaway.`);
+      return;
+    }
+
+    // Pick winners (no duplicates)
+    const shuffled = [...entries].sort(() => Math.random() - 0.5);
+    const winners = shuffled.slice(0, Math.min(winnerCount, entries.length));
+    const winnerMentions = winners.map(id => `<@${id}>`).join(', ');
+
+    const endEmbed = new EmbedBuilder()
+      .setColor(0xffd700)
+      .setTitle('🎉 Giveaway Ended!')
+      .setDescription(`**Prize:** ${giveaway.prize}\n\n🏆 **Winner(s):** ${winnerMentions}`)
+      .addFields(
+        { name: '👥 Entries', value: `${entries.length}`, inline: true },
+        { name: '🏆 Winners', value: `${winners.length}`, inline: true },
+        { name: '🎟️ Hosted by', value: `<@${giveaway.hostId}>`, inline: true }
+      )
+      .setFooter({ text: 'JARVIS Giveaways • Ended' })
+      .setTimestamp();
+
+    await msg.edit({ embeds: [endEmbed], components: [] });
+    await channel.send(`🎉 Congratulations ${winnerMentions}! You won **${giveaway.prize}**!`);
+
+    // Store winners for reroll
+    giveaway.winners = winners;
+    await redis.set(key, JSON.stringify(giveaway));
+
+    // Clear active timer if exists
+    if (activeGiveaways.has(messageId)) {
+      clearTimeout(activeGiveaways.get(messageId));
+      activeGiveaways.delete(messageId);
+    }
+  } catch (err) {
+    console.error('[Giveaway] endGiveaway error:', err.message);
+  }
+}
+
 
 // =========================
 // ── TICKET HELPERS ────────
@@ -1049,6 +1114,26 @@ new SlashCommandBuilder()
   .addChannelOption(o => o.setName('channel').setDescription('Channel to receive broadcasts').setRequired(true))
   .setDMPermission(false),
 
+
+  new SlashCommandBuilder()
+  .setName('giveaway')
+  .setDescription('Giveaway commands')
+  .addSubcommand(sub =>
+    sub.setName('start').setDescription('Start a giveaway')
+      .addStringOption(o => o.setName('prize').setDescription('What are you giving away?').setRequired(true))
+      .addIntegerOption(o => o.setName('minutes').setDescription('Duration in minutes').setRequired(true).setMinValue(1).setMaxValue(10080))
+      .addIntegerOption(o => o.setName('winners').setDescription('Number of winners').setRequired(false).setMinValue(1).setMaxValue(20))
+  )
+  .addSubcommand(sub =>
+    sub.setName('end').setDescription('End a giveaway early')
+      .addStringOption(o => o.setName('messageid').setDescription('Message ID of the giveaway').setRequired(true))
+  )
+  .addSubcommand(sub =>
+    sub.setName('reroll').setDescription('Reroll a giveaway winner')
+      .addStringOption(o => o.setName('messageid').setDescription('Message ID of the giveaway').setRequired(true))
+  )
+  .setDMPermission(false),
+
 ].map(c => c.toJSON());
 
 // =========================
@@ -1080,6 +1165,66 @@ client.once('clientReady', async () => {
   console.log(`ONLINE 🔥 als ${client.user.tag}`);
   await deployCommands();
   setInterval(loadDashboardConfig, 15_000);
+});
+
+
+// =========================
+// GUILD JOIN — Welcome DM to server owner
+// =========================
+client.on('guildCreate', async (guild) => {
+  console.log(`✅ Joined new guild: ${guild.name} (${guild.id})`);
+
+  // Try to find someone to send to — prefer owner
+  let target = null;
+  try {
+    const owner = await guild.fetchOwner();
+    target = owner.user;
+  } catch {}
+
+  if (!target) return;
+
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setAuthor({ name: 'JARVIS', iconURL: client.user.displayAvatarURL() })
+    .setTitle(`👋 Thanks for adding JARVIS to ${guild.name}!`)
+    .setDescription(`I'm JARVIS — your server's AI-powered assistant.\n\nHere's what I can do:\n🤖 AI chat & image generation\n🛡️ AutoMod & logging\n🎫 Ticket system\n🎮 Games & trivia\n🌐 Web search & weather\n\nGet started with \`/help\` to see all commands.`)
+    .addFields(
+      { name: '⚙️ Dashboard', value: '[Configure your settings](https://jarvisbot-rust.vercel.app/dashboard.html)', inline: true },
+      { name: '💬 Support Server', value: '[Join here](https://discord.gg/5NtU3eFBrM)', inline: true },
+      { name: '📨 Invite JARVIS', value: '[Invite link](https://jarvisbot-rust.vercel.app/)', inline: true }
+    )
+    .setThumbnail(client.user.displayAvatarURL({ size: 256 }))
+    .setFooter({ text: 'JARVIS • Built by W.Idoe known as AimZz' })
+    .setTimestamp();
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setLabel('💬 Join Support Server')
+      .setStyle(ButtonStyle.Link)
+      .setURL('https://discord.gg/5NtU3eFBrM'),
+    new ButtonBuilder()
+      .setLabel('⚙️ Dashboard')
+      .setStyle(ButtonStyle.Link)
+      .setURL('https://jarvisbot-rust.vercel.app/dashboard.html'),
+    new ButtonBuilder()
+      .setLabel('📖 Commands')
+      .setStyle(ButtonStyle.Link)
+      .setURL('https://jarvisbot-rust.vercel.app/')
+  );
+
+  try {
+    await target.send({ embeds: [embed], components: [row] });
+  } catch (err) {
+    // Owner has DMs off — try first text channel instead
+    const channel = guild.channels.cache.find(
+      c => c.isTextBased() && c.permissionsFor(guild.members.me)?.has('SendMessages')
+    );
+    if (channel) {
+      try {
+        await channel.send({ content: `👋 Hey! Thanks for adding me. <@${target.id}>`, embeds: [embed], components: [row] });
+      } catch {}
+    }
+  }
 });
 
 // =========================
@@ -1235,7 +1380,162 @@ if (interaction.isButton() && interaction.customId.startsWith('ttt_')) {
     components: [row, row2]
   });
 }
+
+// ── Giveaway enter button ──────────────────────────────────────
+if (interaction.isButton() && interaction.customId.startsWith('giveaway_enter_')) {
+  const messageId = interaction.customId.split('giveaway_enter_')[1];
+  const key = `giveaway-${messageId}`;
+
+  try {
+    const data = await redis.get(key);
+    if (!data) return interaction.reply({ content: '❌ Giveaway not found.', flags: 64 });
+
+    const giveaway = typeof data === 'string' ? JSON.parse(data) : data;
+    if (giveaway.ended) return interaction.reply({ content: '❌ This giveaway has already ended.', flags: 64 });
+
+    giveaway.entries = giveaway.entries || [];
+
+    if (giveaway.entries.includes(interaction.user.id)) {
+      // Toggle — let them leave
+      giveaway.entries = giveaway.entries.filter(id => id !== interaction.user.id);
+      await redis.set(key, JSON.stringify(giveaway));
+
+      // Update embed entry count
+      const msg = await interaction.channel.messages.fetch(messageId);
+      const oldEmbed = msg.embeds[0];
+      const updatedEmbed = EmbedBuilder.from(oldEmbed)
+        .spliceFields(0, oldEmbed.fields.length,
+          { name: '🎟️ Entries', value: `${giveaway.entries.length}`, inline: true },
+          { name: '🏆 Winners', value: `${giveaway.winnerCount}`, inline: true },
+          { name: '🎟️ Hosted by', value: `<@${giveaway.hostId}>`, inline: true }
+        );
+      await msg.edit({ embeds: [updatedEmbed] });
+
+      return interaction.reply({ content: '↩️ You left the giveaway.', flags: 64 });
+    }
+
+    giveaway.entries.push(interaction.user.id);
+    await redis.set(key, JSON.stringify(giveaway));
+
+    // Update embed entry count
+    const msg = await interaction.channel.messages.fetch(messageId);
+    const oldEmbed = msg.embeds[0];
+    const updatedEmbed = EmbedBuilder.from(oldEmbed)
+      .spliceFields(0, oldEmbed.fields.length,
+        { name: '🎟️ Entries', value: `${giveaway.entries.length}`, inline: true },
+        { name: '🏆 Winners', value: `${giveaway.winnerCount}`, inline: true },
+        { name: '🎟️ Hosted by', value: `<@${giveaway.hostId}>`, inline: true }
+      );
+    await msg.edit({ embeds: [updatedEmbed] });
+
+    return interaction.reply({ content: '🎉 You entered the giveaway! Good luck!', flags: 64 });
+  } catch (err) {
+    console.error('[Giveaway] enter error:', err);
+    return interaction.reply({ content: '❌ Something went wrong.', flags: 64 });
+  }
+}
+
   if (!interaction.isChatInputCommand()) return;
+
+  // ── /giveaway ──────────────────────────────────────────────────
+if (interaction.commandName === 'giveaway') {
+  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+  const sub = interaction.options.getSubcommand();
+
+  // ── start ────────────────────────────────────────────────────
+  if (sub === 'start') {
+    if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
+
+    const prize = interaction.options.getString('prize');
+    const minutes = interaction.options.getInteger('minutes');
+    const winnerCount = interaction.options.getInteger('winners') || 1;
+    const endsAt = Date.now() + minutes * 60 * 1000;
+
+    const embed = new EmbedBuilder()
+      .setColor(0xff73fa)
+      .setTitle('🎉 GIVEAWAY!')
+      .setDescription(`**${prize}**\n\nClick the button below to enter!\nEnds: <t:${Math.floor(endsAt / 1000)}:R> (<t:${Math.floor(endsAt / 1000)}:F>)`)
+      .addFields(
+        { name: '🎟️ Entries', value: '0', inline: true },
+        { name: '🏆 Winners', value: `${winnerCount}`, inline: true },
+        { name: '🎟️ Hosted by', value: `<@${interaction.user.id}>`, inline: true }
+      )
+      .setFooter({ text: 'JARVIS Giveaways • Click to enter!' })
+      .setTimestamp(endsAt);
+
+    await interaction.reply({ content: '✅ Giveaway started!', flags: 64 });
+
+    const giveawayMsg = await interaction.channel.send({ embeds: [embed] });
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`giveaway_enter_${giveawayMsg.id}`)
+        .setLabel('🎉 Enter Giveaway')
+        .setStyle(ButtonStyle.Primary)
+    );
+
+    await giveawayMsg.edit({ embeds: [embed], components: [row] });
+
+    // Save to Redis
+    const giveawayData = {
+      prize,
+      winnerCount,
+      hostId: interaction.user.id,
+      channelId: interaction.channel.id,
+      guildId: interaction.guild.id,
+      endsAt,
+      entries: [],
+      ended: false
+    };
+    await redis.set(`giveaway-${giveawayMsg.id}`, JSON.stringify(giveawayData));
+
+    // Set auto-end timer
+    const timer = setTimeout(() => {
+      endGiveaway(interaction.channel, giveawayMsg.id);
+    }, minutes * 60 * 1000);
+    activeGiveaways.set(giveawayMsg.id, timer);
+  }
+
+  // ── end ──────────────────────────────────────────────────────
+  if (sub === 'end') {
+    if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
+
+    const messageId = interaction.options.getString('messageid');
+    await interaction.deferReply({ flags: 64 });
+
+    try {
+      await endGiveaway(interaction.channel, messageId, true);
+      return interaction.editReply('✅ Giveaway ended early!');
+    } catch (err) {
+      return interaction.editReply('❌ Could not find that giveaway in this channel.');
+    }
+  }
+
+  // ── reroll ───────────────────────────────────────────────────
+  if (sub === 'reroll') {
+    if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
+
+    const messageId = interaction.options.getString('messageid');
+    await interaction.deferReply({ flags: 64 });
+
+    try {
+      const key = `giveaway-${messageId}`;
+      const data = await redis.get(key);
+      if (!data) return interaction.editReply('❌ Giveaway not found.');
+
+      const giveaway = typeof data === 'string' ? JSON.parse(data) : data;
+      const entries = giveaway.entries || [];
+
+      if (entries.length === 0) return interaction.editReply('❌ No entries to reroll from.');
+
+      const newWinner = entries[Math.floor(Math.random() * entries.length)];
+      await interaction.channel.send(`🔁 **Reroll!** The new winner is <@${newWinner}>! Congratulations!`);
+      return interaction.editReply('✅ Rerolled!');
+    } catch (err) {
+      return interaction.editReply('❌ Something went wrong.');
+    }
+  }
+}
 
   // ── /ping ──────────────────────────────────────────────────────
   if (interaction.commandName === 'ping') {
