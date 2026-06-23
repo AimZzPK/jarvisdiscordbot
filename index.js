@@ -15,7 +15,10 @@ const {
   ButtonStyle,
   EmbedBuilder,
   AuditLogEvent,
-  ActivityType
+  ActivityType,
+  ModalBuilder,
+  TextInputBuilder,    
+  TextInputStyle,  
 } = require('discord.js');
 
 const OpenAI = require('openai');
@@ -768,7 +771,7 @@ function getPanelList(guildId) {
 /**
  * Create a ticket channel for a given user and panel.
  */
-async function createTicketChannel(guild, user, reason, panelId = 'support') {
+async function createTicketChannel(guild, user, reason, panelId = 'support', answers = []) {
   const existingKey = `ticket-${guild.id}-${user.id}`;
   const existingChannelId = memory[existingKey];
   if (existingChannelId) {
@@ -801,12 +804,18 @@ async function createTicketChannel(guild, user, reason, panelId = 'support') {
   await saveMemory(memory);
 
   const color = parseInt((panel.color || '#5865f2').replace(/^#/, ''), 16) || 0x5865f2;
+  const answerFields = answers.map(a => ({
+    name: `❓ ${a.question}`,
+    value: a.answer || 'No answer provided',
+  }));
+
   const embed = new EmbedBuilder()
     .setColor(color)
     .setTitle(`🎫 ${panel.title} — Ticket #${currentCount}`)
     .setDescription(`Hey <@${user.id}>, support is on the way!\n\nDescribe your issue in detail and a staff member will be with you shortly.`)
     .addFields(
       ...(reason ? [{ name: '📋 Reason', value: reason }] : []),
+      ...answerFields,
       { name: '📂 Panel', value: panel.id, inline: true },
       { name: '👤 Opened by', value: user.tag, inline: true },
       { name: '🕒 Opened at', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true }
@@ -1254,13 +1263,17 @@ client.on('interactionCreate', async (interaction) => {
 
   // ── Panel create ticket button ─────────────────────────────────
   // customId format: panel_create_ticket__<panelId>
-  if (interaction.isButton() && interaction.customId.startsWith('panel_create_ticket')) {
-    if (!interaction.guild) return;
-    // Extract panelId from customId if present
-    const parts = interaction.customId.split('__');
-    const panelId = parts[1] || 'support';
+if (interaction.isButton() && interaction.customId.startsWith('panel_create_ticket')) {
+  if (!interaction.guild) return;
+  const parts = interaction.customId.split('__');
+  const panelId = parts[1] || 'support';
+  const panel = getPanel(interaction.guild.id, panelId);
+  const questions = panel.questions || [];
+
+  // If no questions configured, create ticket immediately
+  if (questions.length === 0) {
     try {
-      const result = await createTicketChannel(interaction.guild, interaction.user, null, panelId);
+      const result = await createTicketChannel(interaction.guild, interaction.user, null, panelId, []);
       if (result.error) return interaction.reply({ content: result.error, flags: 64 });
       return interaction.reply({ content: `✅ Your ticket has been opened: <#${result.channelId}>`, flags: 64 });
     } catch (err) {
@@ -1268,6 +1281,24 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ content: '❌ Failed to create ticket. Make sure I have **Manage Channels** permission.', flags: 64 });
     }
   }
+
+  // Build modal with questions
+  const modal = new ModalBuilder()
+    .setCustomId(`ticket_modal__${panelId}`)
+    .setTitle(panel.title || 'Open a Ticket');
+
+  questions.slice(0, 5).forEach((q, i) => {
+    const input = new TextInputBuilder()
+      .setCustomId(`q_${i}`)
+      .setLabel(q.slice(0, 45))
+      .setStyle(TextInputStyle.Paragraph)
+      .setRequired(true)
+      .setMaxLength(500);
+    modal.addComponents(new ActionRowBuilder().addComponents(input));
+  });
+
+  return interaction.showModal(modal);
+}
 
   // ── Close ticket button ────────────────────────────────────────
   if (interaction.isButton() && interaction.customId.startsWith('closeticket_')) {
@@ -1432,6 +1463,31 @@ if (interaction.isButton() && interaction.customId.startsWith('giveaway_enter_')
   } catch (err) {
     console.error('[Giveaway] enter error:', err);
     return interaction.reply({ content: '❌ Something went wrong.', flags: 64 });
+  }
+}
+
+
+// ── Ticket modal submit ────────────────────────────────────────
+if (interaction.isModalSubmit() && interaction.customId.startsWith('ticket_modal__')) {
+  if (!interaction.guild) return;
+  const panelId = interaction.customId.split('__')[1] || 'support';
+  const panel = getPanel(interaction.guild.id, panelId);
+  const questions = panel.questions || [];
+
+  const answers = questions.map((q, i) => ({
+    question: q,
+    answer: interaction.fields.getTextInputValue(`q_${i}`) || 'No answer',
+  }));
+
+  await interaction.deferReply({ flags: 64 });
+
+  try {
+    const result = await createTicketChannel(interaction.guild, interaction.user, null, panelId, answers);
+    if (result.error) return interaction.editReply({ content: result.error });
+    return interaction.editReply({ content: `✅ Your ticket has been opened: <#${result.channelId}>` });
+  } catch (err) {
+    console.error('[Ticket Modal] create failed:', err);
+    return interaction.editReply({ content: '❌ Failed to create ticket. Make sure I have **Manage Channels** permission.' });
   }
 }
 
@@ -2024,7 +2080,7 @@ if (interaction.commandName === 'giveaway') {
     const reason = interaction.options.getString('reason');
     const panelId = interaction.options.getString('panel') || 'support';
     try {
-      const result = await createTicketChannel(interaction.guild, interaction.user, reason, panelId);
+      const result = await createTicketChannel(interaction.guild, interaction.user, reason, panelId, []);
       if (result.error) return interaction.reply({ content: result.error, flags: 64 });
       return interaction.reply({ content: `✅ Your **${panelId}** ticket has been opened: <#${result.channelId}>`, flags: 64 });
     } catch (err) {
