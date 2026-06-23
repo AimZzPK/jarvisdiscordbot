@@ -2492,7 +2492,7 @@ MODE: ${modeData.prompt}
     saveMemory(memory);
     const chunks = splitMessage(reply);
     for (const chunk of chunks) await message.reply(chunk);
-  } catch (err) { console.error(err); return message.reply("my brain broke, Join https://discord.gg/Ez778smYZ for more information"); }
+  } catch (err) { console.error(err); return message.reply("Error in System Code, Join https://discord.gg/xtnARStdGA for more information"); }
 });
 
 client.login(process.env.DISCORD_TOKEN);
