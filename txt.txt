@@ -9,3 +9,36 @@ git push
  const guildId = message.guild?.id || 'dm';
   const activeMode = getActiveMode(guildId);
   const modeData = MODES[activeMode];
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  [0–3s]
+"Your Discord server is missing THIS… 👀"
+
+[3–8s]
+"This bot can literally change how your community works 🤖"
+
+[8–15s]
+"Auto moderation ✅
+Live AI chatbot
+Server tools 🚀"
+
+[15–22s]
+"Stop doing everything manually… let your bot handle it."
+
+[22–28s]
+"Thousands of servers are upgrading. Is yours next? 👀"
+
+[28–35s]
+"Add JARVIS today. Link in bio 🚀"

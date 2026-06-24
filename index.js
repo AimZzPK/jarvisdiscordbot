@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const activeGiveaways = new Map(); // messageId -> timeout
+const { initSocialNotifications } = require('./socialNotifications');
 const axios = require('axios');
 
 const {
@@ -1140,6 +1141,47 @@ new SlashCommandBuilder()
   .addSubcommand(sub =>
     sub.setName('reroll').setDescription('Reroll a giveaway winner')
       .addStringOption(o => o.setName('messageid').setDescription('Message ID of the giveaway').setRequired(true))
+  ),
+
+  new SlashCommandBuilder()
+  .setName('setnotify')
+  .setDescription('Configure social media notifications for this server')
+  .addSubcommand(sub =>
+    sub.setName('youtube')
+      .setDescription('Add a YouTube channel to watch')
+      .addStringOption(o => o.setName('channelid').setDescription('YouTube channel ID (starts with UC...)').setRequired(true))
+      .addChannelOption(o => o.setName('channel').setDescription('Discord channel to post alerts in').setRequired(true))
+      .addRoleOption(o => o.setName('pingrole').setDescription('Role to ping (optional)').setRequired(false))
+  )
+  .addSubcommand(sub =>
+    sub.setName('twitch')
+      .setDescription('Add a Twitch streamer to watch')
+      .addStringOption(o => o.setName('username').setDescription('Twitch username').setRequired(true))
+      .addChannelOption(o => o.setName('channel').setDescription('Discord channel to post alerts in').setRequired(true))
+      .addRoleOption(o => o.setName('pingrole').setDescription('Role to ping when they go live (optional)').setRequired(false))
+  )
+  .addSubcommand(sub =>
+    sub.setName('tiktok')
+      .setDescription('Add a TikTok account to watch')
+      .addStringOption(o => o.setName('username').setDescription('TikTok username (without @)').setRequired(true))
+      .addChannelOption(o => o.setName('channel').setDescription('Discord channel to post alerts in').setRequired(true))
+      .addRoleOption(o => o.setName('pingrole').setDescription('Role to ping (optional)').setRequired(false))
+  )
+  .addSubcommand(sub =>
+    sub.setName('remove')
+      .setDescription('Remove a tracked account')
+      .addStringOption(o =>
+        o.setName('platform').setDescription('Platform').setRequired(true)
+          .addChoices(
+            { name: 'YouTube', value: 'youtube' },
+            { name: 'Twitch',  value: 'twitch'  },
+            { name: 'TikTok',  value: 'tiktok'  },
+          )
+      )
+      .addStringOption(o => o.setName('username').setDescription('Channel ID or username to remove').setRequired(true))
+  )
+  .addSubcommand(sub =>
+    sub.setName('list').setDescription('Show all tracked accounts for this server')
   )
   .setDMPermission(false),
 
@@ -1174,6 +1216,8 @@ client.once('clientReady', async () => {
   console.log(`ONLINE 🔥 als ${client.user.tag}`);
   await deployCommands();
   setInterval(loadDashboardConfig, 15_000);
+
+  initSocialNotifications(client, redis, () => dashboardConfig, EmbedBuilder);
 });
 
 
@@ -2239,6 +2283,89 @@ if (interaction.commandName === 'broadcast') {
   );
 }
 
+if (interaction.commandName === 'setnotify') {
+  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+  if (!interaction.member.permissions.has('ManageGuild'))
+    return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
+ 
+  const sub = interaction.options.getSubcommand();
+ 
+  // Ensure nested config exists
+  dashboardConfig.socialNotifications = dashboardConfig.socialNotifications || {};
+  dashboardConfig.socialNotifications[interaction.guild.id] =
+    dashboardConfig.socialNotifications[interaction.guild.id] || {};
+  const gc = dashboardConfig.socialNotifications[interaction.guild.id];
+ 
+  if (sub === 'youtube') {
+    const ytId     = interaction.options.getString('channelid');
+    const channel  = interaction.options.getChannel('channel');
+    const pingRole = interaction.options.getRole('pingrole');
+    gc.youtube = gc.youtube || { channels: [], channelId: null, pingRoleId: null };
+    if (!gc.youtube.channels.includes(ytId)) gc.youtube.channels.push(ytId);
+    gc.youtube.channelId  = channel.id;
+    if (pingRole) gc.youtube.pingRoleId = pingRole.id;
+    await saveDashboardConfig(dashboardConfig);
+    return interaction.reply(`✅ Now watching YouTube channel \`${ytId}\`. Alerts → <#${channel.id}>${pingRole ? ` • Ping: <@&${pingRole.id}>` : ''}`);
+  }
+ 
+  if (sub === 'twitch') {
+    const username = interaction.options.getString('username').toLowerCase();
+    const channel  = interaction.options.getChannel('channel');
+    const pingRole = interaction.options.getRole('pingrole');
+    gc.twitch = gc.twitch || { streamers: [], channelId: null, pingRoleId: null };
+    if (!gc.twitch.streamers.includes(username)) gc.twitch.streamers.push(username);
+    gc.twitch.channelId  = channel.id;
+    if (pingRole) gc.twitch.pingRoleId = pingRole.id;
+    await saveDashboardConfig(dashboardConfig);
+    return interaction.reply(`✅ Now watching Twitch streamer **${username}**. Alerts → <#${channel.id}>${pingRole ? ` • Ping: <@&${pingRole.id}>` : ''}`);
+  }
+ 
+  if (sub === 'tiktok') {
+    const username = interaction.options.getString('username').replace(/^@/, '');
+    const channel  = interaction.options.getChannel('channel');
+    const pingRole = interaction.options.getRole('pingrole');
+    gc.tiktok = gc.tiktok || { accounts: [], channelId: null, pingRoleId: null };
+    if (!gc.tiktok.accounts.includes(username)) gc.tiktok.accounts.push(username);
+    gc.tiktok.channelId  = channel.id;
+    if (pingRole) gc.tiktok.pingRoleId = pingRole.id;
+    await saveDashboardConfig(dashboardConfig);
+    return interaction.reply(`✅ Now watching TikTok **@${username}**. Alerts → <#${channel.id}>${pingRole ? ` • Ping: <@&${pingRole.id}>` : ''}`);
+  }
+ 
+  if (sub === 'remove') {
+    const platform = interaction.options.getString('platform');
+    const target   = interaction.options.getString('username').toLowerCase();
+    const gc2      = dashboardConfig.socialNotifications?.[interaction.guild.id];
+    if (!gc2) return interaction.reply({ content: '❌ No notifications configured.', flags: 64 });
+    if (platform === 'youtube' && gc2.youtube?.channels) {
+      gc2.youtube.channels = gc2.youtube.channels.filter(c => c !== target);
+    } else if (platform === 'twitch' && gc2.twitch?.streamers) {
+      gc2.twitch.streamers = gc2.twitch.streamers.filter(s => s !== target);
+    } else if (platform === 'tiktok' && gc2.tiktok?.accounts) {
+      gc2.tiktok.accounts = gc2.tiktok.accounts.filter(a => a !== target);
+    }
+    await saveDashboardConfig(dashboardConfig);
+    return interaction.reply(`✅ Removed \`${target}\` from ${platform} tracking.`);
+  }
+ 
+  if (sub === 'list') {
+    const gc3 = dashboardConfig.socialNotifications?.[interaction.guild.id] || {};
+    const ytList  = gc3.youtube?.channels?.map(c => `\`${c}\``).join(', ') || 'None';
+    const ttList  = gc3.twitch?.streamers?.map(s => `**${s}**`).join(', ') || 'None';
+    const tikList = gc3.tiktok?.accounts?.map(a => `@${a}`).join(', ') || 'None';
+    const embed = new EmbedBuilder()
+      .setColor(0x00c8ff)
+      .setTitle('📡 Social Notifications')
+      .addFields(
+        { name: '🔴 YouTube',  value: `Channels: ${ytList}\nAlerts: ${gc3.youtube?.channelId  ? `<#${gc3.youtube.channelId}>`  : 'Not set'}\nPing: ${gc3.youtube?.pingRoleId  ? `<@&${gc3.youtube.pingRoleId}>`  : 'None'}` },
+        { name: '🟣 Twitch',   value: `Streamers: ${ttList}\nAlerts: ${gc3.twitch?.channelId  ? `<#${gc3.twitch.channelId}>`  : 'Not set'}\nPing: ${gc3.twitch?.pingRoleId  ? `<@&${gc3.twitch.pingRoleId}>`  : 'None'}` },
+        { name: '⚫ TikTok',   value: `Accounts: ${tikList}\nAlerts: ${gc3.tiktok?.channelId  ? `<#${gc3.tiktok.channelId}>`  : 'Not set'}\nPing: ${gc3.tiktok?.pingRoleId  ? `<@&${gc3.tiktok.pingRoleId}>`  : 'None'}` },
+      )
+      .setFooter({ text: 'JARVIS • Social Notifications' })
+      .setTimestamp();
+    return interaction.reply({ embeds: [embed], flags: 64 });
+  }
+}
 // ── /rps ───────────────────────────────────────────────────────
 if (interaction.commandName === 'rps') {
   const choices = ['rock', 'paper', 'scissors'];
