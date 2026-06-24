@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const activeGiveaways = new Map(); // messageId -> timeout
+const { initSocialNotifications } = require('./socialNotifications');
 const axios = require('axios');
 
 const {
@@ -1215,6 +1216,9 @@ client.once('clientReady', async () => {
   console.log(`ONLINE 🔥 als ${client.user.tag}`);
   await deployCommands();
   setInterval(loadDashboardConfig, 15_000);
+
+
+  initSocialNotifications(client, redis, () => dashboardConfig, EmbedBuilder);
 });
 
 

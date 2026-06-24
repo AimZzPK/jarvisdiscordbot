@@ -10,6 +10,10 @@ git push
   const activeMode = getActiveMode(guildId);
   const modeData = MODES[activeMode];
 
+  git add socialNotifications.js
+git commit -m "Add social notifications module"
+git push
+
 
 
 
