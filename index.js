@@ -1,7 +1,6 @@
 const fs = require('fs');
 const path = require('path');
 const activeGiveaways = new Map(); // messageId -> timeout
-const { initSocialNotifications } = require('./socialNotifications');
 const axios = require('axios');
 
 const {
