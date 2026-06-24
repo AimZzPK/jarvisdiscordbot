@@ -1215,8 +1215,6 @@ client.once('clientReady', async () => {
   console.log(`ONLINE 🔥 als ${client.user.tag}`);
   await deployCommands();
   setInterval(loadDashboardConfig, 15_000);
-
-  initSocialNotifications(client, redis, () => dashboardConfig, EmbedBuilder);
 });
 
 
