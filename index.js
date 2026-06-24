@@ -1825,13 +1825,18 @@ if (interaction.commandName === 'giveaway') {
   }
 
   // ── /ban ───────────────────────────────────────────────────────
-  if (interaction.commandName === 'ban') {
-    if (!interaction.guild) return interaction.reply({ content: "❌ Server only", flags: 64 });
-    if (!interaction.member.permissions.has("BanMembers")) return interaction.reply({ content: "❌ no permission", flags: 64 });
-    const user = interaction.options.getUser('user');
+if (interaction.commandName === 'ban') {
+  if (!interaction.guild) return interaction.reply({ content: "❌ Server only", flags: 64 });
+  if (!interaction.member.permissions.has("BanMembers")) return interaction.reply({ content: "❌ no permission", flags: 64 });
+  const user = interaction.options.getUser('user');
+  try {
     await interaction.guild.members.ban(user.id);
     return interaction.reply(`🔨 banned ${user.tag}`);
+  } catch (err) {
+    console.error('[Ban] failed:', err.message);
+    return interaction.reply({ content: `❌ Could not ban that user: ${err.message}`, flags: 64 });
   }
+}
 
   // ── /search ────────────────────────────────────────────────────
   if (interaction.commandName === 'search') {
