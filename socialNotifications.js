@@ -17,7 +17,7 @@
 
 const axios = require('axios');
 
-const CHECK_INTERVAL_MS = 2 * 60 * 1000; // every 2 minutes
+const CHECK_INTERVAL_MS = 5 * 60 * 1000; // every 5 minutes
 
 // =========================
 // REDIS "LAST SEEN" HELPERS
@@ -67,29 +67,66 @@ async function sendAnnouncement(client, channelId, pingRoleId, embed) {
 // YOUTUBE
 // =========================
 // Uses the YouTube Data API v3 (same YOUTUBE_API_KEY already used elsewhere
-// in the bot for /youtube and link previews). Checks each channel's uploads
-// for a new "most recent video" via the search endpoint ordered by date.
+// in the bot for /youtube and link previews).
+//
+// IMPORTANT — QUOTA: search.list costs 100 units per call. With multiple
+// channels polled every couple minutes, that blows through the default
+// 10,000 units/day quota in under an hour. Instead we use:
+//   channels.list (1 unit)      -> get the channel's "uploads" playlist ID
+//   playlistItems.list (1 unit) -> get the latest video in that playlist
+// Total: 2 units per check instead of 100 — a 50x reduction.
+// The uploads playlist ID never changes for a channel, so we cache it in
+// Redis after the first lookup and skip the channels.list call on future
+// checks, bringing steady-state cost down to just 1 unit per check.
+
+async function getUploadsPlaylistId(redis, apiKey, ytChannelId) {
+  const cacheKey = `social-uploadsplaylist-${ytChannelId}`;
+  try {
+    const cached = await redis.get(cacheKey);
+    if (cached) return cached;
+  } catch {}
+
+  const res = await axios.get('https://www.googleapis.com/youtube/v3/channels', {
+    params: {
+      key: apiKey,
+      id: ytChannelId,
+      part: 'contentDetails',
+    },
+  });
+
+  const playlistId = res.data.items?.[0]?.contentDetails?.relatedPlaylists?.uploads;
+  if (!playlistId) return null;
+
+  try {
+    await redis.set(cacheKey, playlistId);
+  } catch {}
+
+  return playlistId;
+}
 
 async function checkYoutubeChannel(client, redis, EmbedBuilder, ytChannelId, targetChannelId, pingRoleId) {
   const apiKey = process.env.YOUTUBE_API_KEY;
   if (!apiKey) return; // silently skip — handled by one-time warning at startup
 
   try {
-    const res = await axios.get('https://www.googleapis.com/youtube/v3/search', {
+    const uploadsPlaylistId = await getUploadsPlaylistId(redis, apiKey, ytChannelId);
+    if (!uploadsPlaylistId) return;
+
+    const res = await axios.get('https://www.googleapis.com/youtube/v3/playlistItems', {
       params: {
         key: apiKey,
-        channelId: ytChannelId,
+        playlistId: uploadsPlaylistId,
         part: 'snippet',
-        order: 'date',
         maxResults: 1,
-        type: 'video',
       },
     });
 
     const item = res.data.items?.[0];
     if (!item) return;
 
-    const videoId = item.id.videoId;
+    const videoId = item.snippet.resourceId?.videoId;
+    if (!videoId) return;
+
     const lastSeen = await getLastSeen(redis, 'youtube', ytChannelId);
 
     // First run for this channel — store baseline, don't announce old content
