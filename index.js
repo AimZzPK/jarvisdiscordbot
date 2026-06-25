@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const activeGiveaways = new Map(); // messageId -> timeout
 const { initSocialNotifications } = require('./socialNotifications');
+const { joinAndListen, leaveVoice, initVoiceAssistant } = require('./voiceAssistant');
 const axios = require('axios');
 
 const {
@@ -1177,6 +1178,16 @@ new SlashCommandBuilder()
   )
   .setDMPermission(false),
 
+  new SlashCommandBuilder()
+      .setName('setvoicechannel')
+      .setDescription('Set the voice channel JARVIS joins 24/7 and listens in')
+      .addChannelOption(o => o.setName('channel').setDescription('Voice channel').setRequired(true).addChannelTypes(2))
+      .setDMPermission(false),
+    new SlashCommandBuilder()
+      .setName('leavevoice')
+      .setDescription('Make JARVIS leave the voice channel')
+      .setDMPermission(false),
+
 ].map(c => c.toJSON());
 
 // =========================
@@ -1197,22 +1208,37 @@ client.once('clientReady', async () => {
   await loadDashboardConfig();
 
   client.user.setPresence({
-  activities: [
-    {
-      name: "Join discord.gg/5NtU3eFBrM",
-    }
-  ],
-  status: "online"
-});
+    activities: [{ name: "Join discord.gg/5NtU3eFBrM" }],
+    status: "online"
+  });
 
   console.log(`ONLINE 🔥 als ${client.user.tag}`);
   await deployCommands();
   setInterval(loadDashboardConfig, 15_000);
 
-
   initSocialNotifications(client, redis, () => dashboardConfig, EmbedBuilder);
-});
 
+  // ── VOICE ASSISTANT INIT ─────────────────────────────────
+  const voiceDeps = {
+    groq, // your existing groq client — works fine for Whisper too
+    getReplyForVoice: async ({ guildId, userId, transcript }) => {
+      const activeMode = getActiveMode(guildId);
+      const modeData = MODES[activeMode];
+      const res = await groq.chat.completions.create({
+        model: 'llama-3.1-8b-instant',
+        messages: [
+          { role: 'system', content: `You are JARVIS speaking out loud in a Discord voice channel. ${modeData.prompt} Keep replies SHORT — 1-2 sentences, since this gets read aloud via TTS. No emojis, no markdown, no asterisks — plain spoken text only.` },
+          { role: 'user', content: transcript },
+        ],
+        temperature: 0.85,
+        max_tokens: 120,
+      });
+      return res.choices[0].message.content;
+    },
+  };
+
+  await initVoiceAssistant(client, () => dashboardConfig, voiceDeps);
+});
 
 // =========================
 // GUILD JOIN — Welcome DM to server owner
@@ -1716,6 +1742,26 @@ if (interaction.commandName === 'giveaway') {
       return interaction.reply({ content: "✅ Feedback sent! Thanks ❤️", flags: 64 });
     } catch (err) { console.error(err); return interaction.reply({ content: "❌ Could not send feedback", flags: 64 }); }
   }
+
+  if (interaction.commandName === 'setvoicechannel') {
+     if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+      if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need Manage Server permission.', flags: 64 });
+      const channel = interaction.options.getChannel('channel');
+      dashboardConfig.voiceChannels = dashboardConfig.voiceChannels || {};
+      dashboardConfig.voiceChannels[interaction.guild.id] = channel.id;
+      await saveDashboardConfig(dashboardConfig);
+      await joinAndListen(client, interaction.guild, channel.id, voiceDeps);
+      return interaction.reply(`✅ JARVIS will now stay in <#${channel.id}> 24/7 and listen for voice chat.`);
+    }
+
+    if (interaction.commandName === 'leavevoice') {
+      if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+      if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need Manage Server permission.', flags: 64 });
+     delete dashboardConfig.voiceChannels?.[interaction.guild.id];
+     await saveDashboardConfig(dashboardConfig);
+      leaveVoice(interaction.guild.id);
+      return interaction.reply('👋 Left the voice channel.');
+    }
 
   // ── /reviews ───────────────────────────────────────────────────
   if (interaction.commandName === 'reviews') {
