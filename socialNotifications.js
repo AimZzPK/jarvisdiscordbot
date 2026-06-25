@@ -17,7 +17,7 @@
 
 const axios = require('axios');
 
-const CHECK_INTERVAL_MS = 5 * 60 * 1000; // every 5 minutes
+const CHECK_INTERVAL_MS = 15 * 60 * 1000; // every 15 minutes
 
 // =========================
 // REDIS "LAST SEEN" HELPERS
