@@ -115,11 +115,16 @@ function resamplePcmWithFfmpeg(pcmBuffer, inRate = 22050) {
 async function speakInVoice(session, text) {
   if (!text || !text.trim()) return;
   try {
+    const t0 = Date.now();
     const rawPcm = await piperSpeak(text);
+    const t1 = Date.now();
     const resampled = await resamplePcmWithFfmpeg(rawPcm, 22050);
+    const t2 = Date.now();
     const resource = pcmBufferToResource(resampled, 48000);
     session.player.play(resource);
     await entersState(session.player, AudioPlayerStatus.Playing, 5000).catch(() => {});
+    const t3 = Date.now();
+    console.log(`[Voice TIMING] piper=${t1 - t0}ms ffmpeg_resample=${t2 - t1}ms play_start=${t3 - t2}ms`);
     await new Promise((resolve) => {
       session.player.once(AudioPlayerStatus.Idle, resolve);
     });
@@ -234,10 +239,13 @@ async function finalizeCapture(capKey, deps) {
 
   try {
     const { groq, getReplyForVoice } = deps;
+    const tCaptureEnd = Date.now();
     const transcript = await transcribeWithGroq(groq, pcmBuffer);
+    const tSttDone = Date.now();
     if (!transcript || transcript.length < 2) return;
 
     console.log(`[Voice] ${userId} said: "${transcript}"`);
+    console.log(`[Voice TIMING] stt=${tSttDone - tCaptureEnd}ms (audio_ms=${durationMs})`);
 
     // Drop overlap: if JARVIS is currently speaking/processing, skip this
     // utterance entirely rather than queueing it.
@@ -249,7 +257,10 @@ async function finalizeCapture(capKey, deps) {
     session.lastSpeakerLock = userId;
 
     try {
+      const tLlmStart = Date.now();
       const replyText = await getReplyForVoice({ guildId, userId, transcript });
+      const tLlmDone = Date.now();
+      console.log(`[Voice TIMING] llm=${tLlmDone - tLlmStart}ms total_before_tts=${tLlmDone - tCaptureEnd}ms`);
       if (replyText) await speakInVoice(session, replyText);
     } finally {
       session.busy = false;
