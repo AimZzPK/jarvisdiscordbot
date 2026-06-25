@@ -1161,13 +1161,6 @@ new SlashCommandBuilder()
       .addRoleOption(o => o.setName('pingrole').setDescription('Role to ping when they go live (optional)').setRequired(false))
   )
   .addSubcommand(sub =>
-    sub.setName('tiktok')
-      .setDescription('Add a TikTok account to watch')
-      .addStringOption(o => o.setName('username').setDescription('TikTok username (without @)').setRequired(true))
-      .addChannelOption(o => o.setName('channel').setDescription('Discord channel to post alerts in').setRequired(true))
-      .addRoleOption(o => o.setName('pingrole').setDescription('Role to ping (optional)').setRequired(false))
-  )
-  .addSubcommand(sub =>
     sub.setName('remove')
       .setDescription('Remove a tracked account')
       .addStringOption(o =>
@@ -1175,7 +1168,6 @@ new SlashCommandBuilder()
           .addChoices(
             { name: 'YouTube', value: 'youtube' },
             { name: 'Twitch',  value: 'twitch'  },
-            { name: 'TikTok',  value: 'tiktok'  },
           )
       )
       .addStringOption(o => o.setName('username').setDescription('Channel ID or username to remove').setRequired(true))
@@ -2326,18 +2318,6 @@ if (interaction.commandName === 'setnotify') {
     return interaction.reply(`✅ Now watching Twitch streamer **${username}**. Alerts → <#${channel.id}>${pingRole ? ` • Ping: <@&${pingRole.id}>` : ''}`);
   }
  
-  if (sub === 'tiktok') {
-    const username = interaction.options.getString('username').replace(/^@/, '');
-    const channel  = interaction.options.getChannel('channel');
-    const pingRole = interaction.options.getRole('pingrole');
-    gc.tiktok = gc.tiktok || { accounts: [], channelId: null, pingRoleId: null };
-    if (!gc.tiktok.accounts.includes(username)) gc.tiktok.accounts.push(username);
-    gc.tiktok.channelId  = channel.id;
-    if (pingRole) gc.tiktok.pingRoleId = pingRole.id;
-    await saveDashboardConfig(dashboardConfig);
-    return interaction.reply(`✅ Now watching TikTok **@${username}**. Alerts → <#${channel.id}>${pingRole ? ` • Ping: <@&${pingRole.id}>` : ''}`);
-  }
- 
   if (sub === 'remove') {
     const platform = interaction.options.getString('platform');
     const target   = interaction.options.getString('username').toLowerCase();
@@ -2347,8 +2327,6 @@ if (interaction.commandName === 'setnotify') {
       gc2.youtube.channels = gc2.youtube.channels.filter(c => c !== target);
     } else if (platform === 'twitch' && gc2.twitch?.streamers) {
       gc2.twitch.streamers = gc2.twitch.streamers.filter(s => s !== target);
-    } else if (platform === 'tiktok' && gc2.tiktok?.accounts) {
-      gc2.tiktok.accounts = gc2.tiktok.accounts.filter(a => a !== target);
     }
     await saveDashboardConfig(dashboardConfig);
     return interaction.reply(`✅ Removed \`${target}\` from ${platform} tracking.`);
@@ -2358,14 +2336,12 @@ if (interaction.commandName === 'setnotify') {
     const gc3 = dashboardConfig.socialNotifications?.[interaction.guild.id] || {};
     const ytList  = gc3.youtube?.channels?.map(c => `\`${c}\``).join(', ') || 'None';
     const ttList  = gc3.twitch?.streamers?.map(s => `**${s}**`).join(', ') || 'None';
-    const tikList = gc3.tiktok?.accounts?.map(a => `@${a}`).join(', ') || 'None';
     const embed = new EmbedBuilder()
       .setColor(0x00c8ff)
       .setTitle('📡 Social Notifications')
       .addFields(
         { name: '🔴 YouTube',  value: `Channels: ${ytList}\nAlerts: ${gc3.youtube?.channelId  ? `<#${gc3.youtube.channelId}>`  : 'Not set'}\nPing: ${gc3.youtube?.pingRoleId  ? `<@&${gc3.youtube.pingRoleId}>`  : 'None'}` },
         { name: '🟣 Twitch',   value: `Streamers: ${ttList}\nAlerts: ${gc3.twitch?.channelId  ? `<#${gc3.twitch.channelId}>`  : 'Not set'}\nPing: ${gc3.twitch?.pingRoleId  ? `<@&${gc3.twitch.pingRoleId}>`  : 'None'}` },
-        { name: '⚫ TikTok',   value: `Accounts: ${tikList}\nAlerts: ${gc3.tiktok?.channelId  ? `<#${gc3.tiktok.channelId}>`  : 'Not set'}\nPing: ${gc3.tiktok?.pingRoleId  ? `<@&${gc3.tiktok.pingRoleId}>`  : 'None'}` },
       )
       .setFooter({ text: 'JARVIS • Social Notifications' })
       .setTimestamp();
