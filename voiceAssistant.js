@@ -46,34 +46,93 @@ const voiceSessions = new Map();
 const activeCaptures = new Map();
 
 // =========================
-// PIPER TTS (free, local, neural)
+// PIPER TTS (free, local, neural) — PERSISTENT PROCESS
 // =========================
-// Piper reads text on stdin and writes raw 16-bit PCM (or wav) audio on stdout
-// depending on flags. We use --output_raw for a simple raw PCM pipe straight
-// into an Opus/PCM audio resource, no temp files needed.
-function piperSpeak(text) {
-  return new Promise((resolve, reject) => {
-    if (!fs.existsSync(PIPER_BIN_PATH)) {
-      return reject(new Error(`Piper binary not found at ${PIPER_BIN_PATH}. See setup notes.`));
+// Spawning a fresh `piper` process per utterance reloads the ONNX voice
+// model from disk every single time, which is exactly the 5-10 SECOND delay
+// you'd see in [Voice TIMING] piper=...ms logs. Loading a neural TTS model
+// is expensive; doing it once and keeping the process alive is the fix.
+//
+// We keep ONE long-running piper process per (model) for the bot's whole
+// lifetime, talk to it with --json-input (one JSON line in -> one chunk of
+// raw PCM out per request), and queue requests so concurrent calls don't
+// interleave garbled audio on the same stdout stream.
+let piperProc = null;
+let piperReady = null; // resolves once the process is spawned and alive
+const piperQueue = []; // FIFO of {text, resolve, reject} so concurrent speakInVoice calls don't race on stdout
+
+function ensurePiperProcess() {
+  if (piperProc && !piperProc.killed) return piperReady;
+
+  if (!fs.existsSync(PIPER_BIN_PATH)) {
+    piperReady = Promise.reject(new Error(`Piper binary not found at ${PIPER_BIN_PATH}. See setup notes.`));
+    return piperReady;
+  }
+
+  piperProc = spawn(PIPER_BIN_PATH, [
+    '--model', PIPER_MODEL_PATH,
+    '--output_raw',
+    '--json-input',
+  ]);
+
+  let stdoutBuf = Buffer.alloc(0);
+  piperProc.stdout.on('data', (chunk) => {
+    stdoutBuf = Buffer.concat([stdoutBuf, chunk]);
+  });
+
+  // Piper's --output_raw with --json-input writes one continuous PCM stream;
+  // there's no built-in delimiter between utterances. To know when one
+  // utterance's audio is "done", we rely on the fact that piper writes audio
+  // synchronously per stdin line before reading the next one — so we drain
+  // stdoutBuf right before sending the *next* request, which is what was
+  // accumulated for the *previous* one.
+  piperProc.stderr.on('data', () => {}); // model load logs, ignore
+
+  piperProc.on('exit', (code) => {
+    console.warn(`[Piper] process exited (code ${code}) — will respawn on next request`);
+    piperProc = null;
+    piperReady = null;
+    // fail anything left queued so callers don't hang forever
+    while (piperQueue.length) {
+      const { reject } = piperQueue.shift();
+      reject(new Error('Piper process exited unexpectedly'));
     }
-    const proc = spawn(PIPER_BIN_PATH, [
-      '--model', PIPER_MODEL_PATH,
-      '--output_raw',
-    ]);
+  });
 
-    const chunks = [];
-    proc.stdout.on('data', (d) => chunks.push(d));
-    proc.stderr.on('data', () => {}); // piper logs model load info to stderr, ignore
-    proc.on('error', reject);
-    proc.on('close', (code) => {
-      if (code !== 0 && chunks.length === 0) {
-        return reject(new Error(`Piper exited with code ${code} and produced no audio`));
-      }
-      resolve(Buffer.concat(chunks));
-    });
+  piperReady = new Promise((resolve, reject) => {
+    // give piper a moment to load the model; --json-input mode doesn't print
+    // a clean "ready" signal, so we wait a short fixed delay on first boot.
+    piperProc.once('error', reject);
+    setTimeout(resolve, 100);
+  });
 
-    proc.stdin.write(text);
-    proc.stdin.end();
+  // drain queue serially whenever stdout goes quiet for a beat (utterance done)
+  let drainTimer = null;
+  piperProc.stdout.on('data', () => {
+    if (drainTimer) clearTimeout(drainTimer);
+    drainTimer = setTimeout(() => {
+      if (piperQueue.length === 0) return;
+      const { resolve } = piperQueue[0];
+      const audio = stdoutBuf;
+      stdoutBuf = Buffer.alloc(0);
+      piperQueue.shift();
+      resolve(audio);
+    }, 150); // 150ms of stdout silence = piper finished writing this utterance's audio
+  });
+
+  return piperReady;
+}
+
+function piperSpeak(text) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      await ensurePiperProcess();
+    } catch (err) {
+      return reject(err);
+    }
+    piperQueue.push({ text, resolve, reject });
+    // piper's --json-input expects one JSON object per line: {"text": "..."}
+    piperProc.stdin.write(JSON.stringify({ text }) + '\n');
   });
 }
 

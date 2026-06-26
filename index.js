@@ -1687,7 +1687,7 @@ if (interaction.commandName === 'giveaway') {
   }
 
   // ── /invite ────────────────────────────────────────────────────
-  if (interaction.commandName === 'invite') { return interaction.reply({ content: `🚀 Invite me here:\n👉 https://jarvisbot-rust.vercel.app/` }); }
+  if (interaction.commandName === 'invite') { return interaction.reply({ content: `🚀 Invite me here:\n👉 https://discord.com/discovery/applications/1507762062359531580` }); }
   if (interaction.commandName === 'portfolio') { return interaction.reply({ content: `🚀 See my Creators Portfolio here:\n👉 https://widoe-portfolio.vercel.app/` }); }
   if (interaction.commandName === 'websites') { return interaction.reply({ content: `🚀 See my Creators Websites here:\n👉 https://widoe-portfolio.vercel.app/\nhttps://jarvisbot-rust.vercel.app/\nhttps://pokedex-bice-zeta-61.vercel.app/` }); }
   if (interaction.commandName === 'dashboard') { return interaction.reply({ content: `⚙️ Change my settings here:\n👉 https://jarvisbot-rust.vercel.app/dashboard.html` }); }
