@@ -364,6 +364,32 @@ async function joinAndListen(client, guild, channelId, deps) {
   const session = { connection, player, channelId, busy: false, lastSpeakerLock: null };
   voiceSessions.set(guild.id, session);
 
+  // CRITICAL: @discordjs/voice emits 'error' on the connection for network-level
+  // failures (e.g. "Cannot perform IP discovery - socket closed"). Node's default
+  // behavior for an unhandled 'error' event on an EventEmitter is to throw and
+  // CRASH THE WHOLE PROCESS — which is exactly what was happening before this
+  // listener existed. We must always have at least one 'error' listener.
+  connection.on('error', (err) => {
+    console.error(`[Voice] connection error in guild ${guild.id}:`, err.message);
+    // Treat it like a disconnect: tear down and retry after a delay, rather
+    // than leaving a half-dead connection object around.
+    try { connection.destroy(); } catch {}
+    voiceSessions.delete(guild.id);
+    setTimeout(() => {
+      joinAndListen(client, guild, channelId, deps).catch((e) =>
+        console.error('[Voice] reconnect-after-error failed:', e.message)
+      );
+    }, RECONNECT_DELAY_MS);
+  });
+
+  // Same reasoning for the audio player — TTS playback errors (e.g. a corrupt
+  // PCM buffer, broken pipe to the resource) also emit 'error' and would
+  // otherwise crash the process the same way.
+  player.on('error', (err) => {
+    console.error(`[Voice] audio player error in guild ${guild.id}:`, err.message);
+    session.busy = false; // don't leave the session permanently "busy" after a playback failure
+  });
+
   connection.on(VoiceConnectionStatus.Disconnected, async () => {
     try {
       await Promise.race([
@@ -409,6 +435,13 @@ function leaveVoice(guildId) {
 /**
  * Call this once after client login + dashboardConfig load to auto-join
  * every guild that has a voiceChannels[guildId] configured (true 24/7).
+ *
+ * Joins are staggered (not fired all at once) because joinVoiceChannel()
+ * returns before the underlying UDP handshake (including IP discovery)
+ * finishes — firing several at once on boot increases the odds of hitting
+ * "Cannot perform IP discovery - socket closed", which crashes the whole
+ * process if unhandled (now guarded against in joinAndListen, but better
+ * to avoid triggering it in the first place).
  */
 async function initVoiceAssistant(client, getDashboardConfig, deps) {
   const cfg = getDashboardConfig();
@@ -417,6 +450,7 @@ async function initVoiceAssistant(client, getDashboardConfig, deps) {
     try {
       const guild = await client.guilds.fetch(guildId);
       await joinAndListen(client, guild, channelId, deps);
+      await new Promise((resolve) => setTimeout(resolve, 2000)); // breathing room before the next join
     } catch (err) {
       console.error(`[Voice] failed to auto-join guild ${guildId}:`, err.message);
     }
