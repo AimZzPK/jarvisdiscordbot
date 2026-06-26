@@ -50,24 +50,31 @@ RUN mkdir -p /tmp/piper-extract && \
 RUN /app/piper/piper --help > /dev/null
 
 # ---------------------------------------------------------
-# VOICE MODEL: en_US-ryan-high
+# VOICE MODEL: en_US-ryan-medium
 # ---------------------------------------------------------
-# `high` quality models are larger (~110MB+) than `medium` ones (~60MB) and
-# cost more CPU per synthesis call — watch the `[Voice TIMING] piper=...ms`
-# logs after deploying. If it's too slow on your Railway tier, swap to a
-# medium-quality male voice (e.g. en_US-joe-medium) instead.
+# Switched from ryan-high after Railway free-tier logs showed
+# [Voice TIMING] piper=...ms in the 5,000-15,500ms range for short
+# sentences — i.e. the bottleneck was TTS synthesis CPU cost, not STT
+# (200-800ms) or the LLM (~115-140ms), both of which were fine.
+#
+# Free-tier Railway gives a heavily CPU-throttled shared container. `high`
+# quality Piper voices use a notably heavier neural architecture than
+# `medium`, and that combination is what produced the multi-second (and
+# inconsistent — 15.5s vs 5.6s for similar text) delays. `medium` does
+# meaningfully less compute per character and should bring piper= back
+# down to roughly the sub-second range this pipeline was designed for.
 #
 # wget --tries/--timeout: HuggingFace occasionally throttles or blips on
 # large file downloads mid-build; without retries a transient failure here
-# kills the whole image build. -q is dropped in favor of explicit error
-# checking via `set -e`-style && chaining plus a post-download size check,
-# since a silently truncated .onnx file is worse than a loud build failure.
-RUN wget --tries=3 --timeout=60 -O /app/piper/en_US-ryan-high.onnx \
-      https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high/en_US-ryan-high.onnx && \
-    wget --tries=3 --timeout=60 -O /app/piper/en_US-ryan-high.onnx.json \
-      https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high/en_US-ryan-high.onnx.json && \
-    test -s /app/piper/en_US-ryan-high.onnx && \
-    test -s /app/piper/en_US-ryan-high.onnx.json
+# kills the whole image build. Explicit error checking via && chaining plus
+# a post-download size check, since a silently truncated .onnx file is
+# worse than a loud build failure.
+RUN wget --tries=3 --timeout=60 -O /app/piper/en_US-ryan-medium.onnx \
+      https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/medium/en_US-ryan-medium.onnx && \
+    wget --tries=3 --timeout=60 -O /app/piper/en_US-ryan-medium.onnx.json \
+      https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/medium/en_US-ryan-medium.onnx.json && \
+    test -s /app/piper/en_US-ryan-medium.onnx && \
+    test -s /app/piper/en_US-ryan-medium.onnx.json
 
 # ---------------------------------------------------------
 # APP
@@ -78,6 +85,6 @@ RUN npm install --omit=dev
 COPY . .
 
 ENV PIPER_BIN_PATH=/app/piper/piper
-ENV PIPER_MODEL_PATH=/app/piper/en_US-ryan-high.onnx
+ENV PIPER_MODEL_PATH=/app/piper/en_US-ryan-medium.onnx
 
 CMD ["node", "index.js"]
