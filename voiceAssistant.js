@@ -28,6 +28,24 @@ const path = require('path');
 const { PassThrough } = require('stream');
 
 // =========================
+// LOGGING NOTE — Railway stdout buffering
+// =========================
+// Railway (like many container log pipelines) can buffer stdout when it's
+// not attached to a TTY, which means console.log lines can appear delayed,
+// batched, or seemingly "missing" even though they fired on time. This is
+// a likely explanation for "no [Voice] said: line at all" while replies
+// still eventually arrive — the log line may have printed, just not been
+// flushed/shipped promptly by Railway's log collector.
+//
+// process.stdout doesn't expose a manual flush() in Node, but writing
+// directly via process.stdout.write with no internal buffering pressure
+// helps in practice, and switching from console.log's default formatting
+// to explicit string concatenation avoids extra internal buffering layers.
+// If logs are STILL missing after this diagnostic pass, check Railway's
+// log retention/streaming settings directly rather than assuming app-level
+// buffering — Railway's free tier has historically rate-limited log volume.
+
+// =========================
 // CONFIG / TUNABLES
 // =========================
 const SILENCE_DEBOUNCE_MS = 900;     // how long someone must be silent before we treat their utterance as "done"
@@ -245,6 +263,13 @@ function listenToUser(session, userId, receiver, deps) {
   // per "speaking session", so this guards against double-subscription.
   if (activeCaptures.has(capKey)) return;
 
+  // DIAGNOSTIC: confirms Discord's speaking-start event fired and we opened
+  // a capture. If you talk and this line NEVER shows up in Railway logs,
+  // the stall is upstream of everything in this file (selfDeaf misconfigured,
+  // wrong channel, permissions) — not STT/LLM/TTS. Safe to leave in
+  // permanently; remove later if log volume becomes noisy.
+  console.log(`[Voice DEBUG] speaking-start: capture opened for user ${userId} in guild ${guildId} at ${new Date().toISOString()}`);
+
   const opusStream = receiver.subscribe(userId, {
     end: { behavior: EndBehaviorType.Manual }, // we manage end ourselves via silence debounce
   });
@@ -259,6 +284,12 @@ function listenToUser(session, userId, receiver, deps) {
     capture.chunks.push(chunk);
     if (capture.silenceTimer) clearTimeout(capture.silenceTimer);
     capture.silenceTimer = setTimeout(() => {
+      // DIAGNOSTIC: marks the moment SILENCE_DEBOUNCE_MS elapsed and we're
+      // handing off to finalizeCapture. If there's a big gap between this
+      // line and "[Voice DEBUG] entering finalizeCapture" below, the event
+      // loop itself is blocked (e.g. piper/ffmpeg synchronous work, or some
+      // other handler hogging the loop) rather than Groq being slow.
+      console.log(`[Voice DEBUG] silence debounce fired for ${capKey} at ${new Date().toISOString()}`);
       clearTimeout(hardStopTimer);
       finalizeCapture(capKey, deps);
     }, SILENCE_DEBOUNCE_MS);
@@ -282,8 +313,16 @@ async function finalizeCapture(capKey, deps) {
   if (!capture) return;
   cleanupCapture(capKey);
 
+  // DIAGNOSTIC: confirms we got this far. If "silence debounce fired" logs
+  // but this never prints, something in cleanupCapture or the activeCaptures
+  // lookup above is throwing synchronously before reaching here.
+  console.log(`[Voice DEBUG] entering finalizeCapture for ${capKey} at ${new Date().toISOString()}`);
+
   const durationMs = Date.now() - capture.startedAt;
-  if (durationMs < MIN_AUDIO_MS || capture.chunks.length === 0) return;
+  if (durationMs < MIN_AUDIO_MS || capture.chunks.length === 0) {
+    console.log(`[Voice DEBUG] capture too short/empty (${durationMs}ms, ${capture.chunks.length} chunks) — discarding`);
+    return;
+  }
 
   const [guildId, userId] = capKey.split('-');
   const session = voiceSessions.get(guildId);
@@ -299,6 +338,11 @@ async function finalizeCapture(capKey, deps) {
   try {
     const { groq, getReplyForVoice } = deps;
     const tCaptureEnd = Date.now();
+    // DIAGNOSTIC: marks the exact moment we hand audio to Groq's Whisper API.
+    // If there's a large gap between this and "stt=...ms" below, the network
+    // call to Groq itself is slow (rate limiting, cold start, large payload,
+    // Railway egress latency) rather than anything in our own code.
+    console.log(`[Voice DEBUG] sending ${pcmBuffer.length} bytes to Groq STT at ${new Date().toISOString()}`);
     const transcript = await transcribeWithGroq(groq, pcmBuffer);
     const tSttDone = Date.now();
     if (!transcript || transcript.length < 2) return;
@@ -321,12 +365,21 @@ async function finalizeCapture(capKey, deps) {
       const tLlmDone = Date.now();
       console.log(`[Voice TIMING] llm=${tLlmDone - tLlmStart}ms total_before_tts=${tLlmDone - tCaptureEnd}ms`);
       if (replyText) await speakInVoice(session, replyText);
+      // DIAGNOSTIC: total wall-clock time from "silence detected" to "audio
+      // finished playing." Compare this against the sum of the individual
+      // stage timings above — if this total is much bigger than the sum,
+      // time is being lost somewhere NOT covered by existing timers (e.g.
+      // queued behind another async task, GC pause, Railway CPU throttling).
+      console.log(`[Voice DEBUG] pipeline complete for ${capKey}, total=${Date.now() - tCaptureEnd}ms`);
     } finally {
       session.busy = false;
       session.lastSpeakerLock = null;
     }
   } catch (err) {
-    console.error('[Voice] pipeline error:', err.message);
+    // Full stack instead of just err.message — a bare message can hide
+    // exactly which await threw, which matters when several awaits are
+    // chained back to back in this function.
+    console.error('[Voice] pipeline error:', err.stack || err.message);
     session.busy = false;
   }
 }
@@ -463,109 +516,3 @@ module.exports = {
   initVoiceAssistant,
   voiceSessions,
 };
-
-// =========================================================
-// INTEGRATION NOTES — edits needed in your main bot file
-// =========================================================
-//
-// 1) At the top of your main file:
-//
-//    const { joinAndListen, leaveVoice, initVoiceAssistant } = require('./voiceAssistant');
-//
-// 2) Add a slash command (next to your other dashboardConfig-driven ones):
-//
-//    new SlashCommandBuilder()
-//      .setName('setvoicechannel')
-//      .setDescription('Set the voice channel JARVIS joins 24/7 and listens in')
-//      .addChannelOption(o => o.setName('channel').setDescription('Voice channel').setRequired(true).addChannelTypes(2))
-//      .setDMPermission(false),
-//    new SlashCommandBuilder()
-//      .setName('leavevoice')
-//      .setDescription('Make JARVIS leave the voice channel')
-//      .setDMPermission(false),
-//
-//    Handler:
-//
-//    if (interaction.commandName === 'setvoicechannel') {
-//      if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
-//      if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need Manage Server permission.', flags: 64 });
-//      const channel = interaction.options.getChannel('channel');
-//      dashboardConfig.voiceChannels = dashboardConfig.voiceChannels || {};
-//      dashboardConfig.voiceChannels[interaction.guild.id] = channel.id;
-//      await saveDashboardConfig(dashboardConfig);
-//      await joinAndListen(client, interaction.guild, channel.id, voiceDeps);
-//      return interaction.reply(`✅ JARVIS will now stay in <#${channel.id}> 24/7 and listen for voice chat.`);
-//    }
-//
-//    if (interaction.commandName === 'leavevoice') {
-//      if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
-//      if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need Manage Server permission.', flags: 64 });
-//      delete dashboardConfig.voiceChannels?.[interaction.guild.id];
-//      await saveDashboardConfig(dashboardConfig);
-//      leaveVoice(interaction.guild.id);
-//      return interaction.reply('👋 Left the voice channel.');
-//    }
-//
-// 3) In your clientReady handler, after loadDashboardConfig():
-//
-//    const voiceDeps = {
-//      groq, // your existing groq client (works fine for Whisper too — same OpenAI-compatible client)
-//      getReplyForVoice: async ({ guildId, userId, transcript }) => {
-//        // Reuse your existing personality/mode system. Kept deliberately
-//        // simple — swap in your `system` prompt builder from messageCreate
-//        // if you want VC replies to share memory/modes with text chat.
-//        const activeMode = getActiveMode(guildId);
-//        const modeData = MODES[activeMode];
-//        const res = await groq.chat.completions.create({
-//          model: 'llama-3.1-8b-instant',
-//          messages: [
-//            { role: 'system', content: `You are JARVIS speaking out loud in a Discord voice channel. ${modeData.prompt} Keep replies SHORT — 1-2 sentences, since this gets read aloud via TTS. No emojis, no markdown, no asterisks — plain spoken text only.` },
-//            { role: 'user', content: transcript },
-//          ],
-//          temperature: 0.85,
-//          max_tokens: 120,
-//        });
-//        return res.choices[0].message.content;
-//      },
-//    };
-//
-//    await initVoiceAssistant(client, () => dashboardConfig, voiceDeps);
-//
-// =========================================================
-// REQUIRED DEPLOYMENT SETUP (Railway, Dockerfile-based service)
-// =========================================================
-//
-// Railway needs to build a container that has Piper installed. Use a
-// Dockerfile (not pure Nixpacks) so you can fetch the Piper binary + model:
-//
-//   FROM node:20-bookworm-slim
-//   RUN apt-get update && apt-get install -y wget tar ca-certificates && rm -rf /var/lib/apt/lists/*
-//   WORKDIR /app
-//   # Piper binary (Linux x64) — check https://github.com/rhasspy/piper/releases for latest
-//   RUN wget -q https://github.com/rhasspy/piper/releases/latest/download/piper_linux_x86_64.tar.gz \
-//       && tar -xzf piper_linux_x86_64.tar.gz -C /app \
-//       && mv /app/piper /app/piper-bin \
-//       && mkdir -p /app/piper && mv /app/piper-bin/* /app/piper/ \
-//       && rm piper_linux_x86_64.tar.gz
-//   # A voice model — lessac-medium is a good free default
-//   RUN wget -q -O /app/piper/en_US-lessac-medium.onnx \
-//       https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx \
-//       && wget -q -O /app/piper/en_US-lessac-medium.onnx.json \
-//       https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json
-//   COPY package*.json ./
-//   RUN npm install --production
-//   COPY . .
-//   CMD ["node", "index.js"]
-//
-// Set Railway's builder to "Dockerfile" in service settings.
-// Env vars needed: PIPER_BIN_PATH=/app/piper/piper, PIPER_MODEL_PATH=/app/piper/en_US-lessac-medium.onnx
-// (the module already defaults to these paths, so you may not need to set them at all)
-//
-// npm packages to add: prism-media, @discordjs/voice, @ffmpeg-installer/ffmpeg
-// (you already have these in your main file's requires — just confirm they're in package.json)
-//
-// Also required at the OS level inside the container: libopus (for prism-media's
-// opus decoding) and ffmpeg (already covered via @ffmpeg-installer/ffmpeg).
-// libopus usually needs: apt-get install -y libopus0 libopus-dev — add that to
-// the Dockerfile's apt-get install line above if you hit Opus decode errors.
-// =========================================================
