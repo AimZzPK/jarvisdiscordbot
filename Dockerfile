@@ -26,18 +26,14 @@ WORKDIR /app
 # ---------------------------------------------------------
 # PIPER TTS BINARY
 # ---------------------------------------------------------
-# IMPORTANT: rhasspy/piper is archived (read-only) as of Oct 2025.
-# "Latest" release is permanently pinned at tag 2023.11.14-2 — this is fine,
-# it still works, just won't get future updates. The maintained successor
-# (OHF-Voice/piper1-gpl) is a Python package, which is more setup for less
-# gain here, so we stick with the old static binary.
+# rhasspy/piper is archived (read-only) as of Oct 2025. "Latest" release is
+# permanently pinned at tag 2023.11.14-2, so we pin that tag explicitly
+# rather than hitting /releases/latest (no functional difference for an
+# archived repo, but explicit is clearer than relying on redirect behavior).
 #
-# We pin the exact tag (not /releases/latest) since for an archived repo
-# there is no meaningful difference, and pinning avoids any ambiguity.
-#
-# The extracted folder name has varied across Piper's history (sometimes
-# `piper/`, sometimes flat). Rather than hardcode a layout, we extract to a
-# staging dir and locate the `piper` executable wherever it landed.
+# The extracted folder layout has varied across Piper's history, so instead
+# of hardcoding a path we extract to a staging dir and locate the `piper`
+# executable wherever it landed.
 RUN mkdir -p /tmp/piper-extract && \
     wget -q https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz \
       -O /tmp/piper.tar.gz && \
@@ -54,12 +50,24 @@ RUN mkdir -p /tmp/piper-extract && \
 RUN /app/piper/piper --help > /dev/null
 
 # ---------------------------------------------------------
-# VOICE MODEL (en_US-lessac-medium — free, good default quality)
+# VOICE MODEL: en_US-ryan-high
 # ---------------------------------------------------------
-RUN wget -q -O /app/piper/en_US-lessac-medium.onnx \
-      https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx && \
-    wget -q -O /app/piper/en_US-lessac-medium.onnx.json \
-      https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json
+# `high` quality models are larger (~110MB+) than `medium` ones (~60MB) and
+# cost more CPU per synthesis call — watch the `[Voice TIMING] piper=...ms`
+# logs after deploying. If it's too slow on your Railway tier, swap to a
+# medium-quality male voice (e.g. en_US-joe-medium) instead.
+#
+# wget --tries/--timeout: HuggingFace occasionally throttles or blips on
+# large file downloads mid-build; without retries a transient failure here
+# kills the whole image build. -q is dropped in favor of explicit error
+# checking via `set -e`-style && chaining plus a post-download size check,
+# since a silently truncated .onnx file is worse than a loud build failure.
+RUN wget --tries=3 --timeout=60 -O /app/piper/en_US-ryan-high.onnx \
+      https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high/en_US-ryan-high.onnx && \
+    wget --tries=3 --timeout=60 -O /app/piper/en_US-ryan-high.onnx.json \
+      https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high/en_US-ryan-high.onnx.json && \
+    test -s /app/piper/en_US-ryan-high.onnx && \
+    test -s /app/piper/en_US-ryan-high.onnx.json
 
 # ---------------------------------------------------------
 # APP
@@ -70,6 +78,6 @@ RUN npm install --omit=dev
 COPY . .
 
 ENV PIPER_BIN_PATH=/app/piper/piper
-ENV PIPER_MODEL_PATH=/app/piper/en_US-lessac-medium.onnx
+ENV PIPER_MODEL_PATH=/app/piper/en_US-ryan-high.onnx
 
 CMD ["node", "index.js"]
