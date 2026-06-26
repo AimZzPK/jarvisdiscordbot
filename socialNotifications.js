@@ -1,376 +1,537 @@
-// =========================
-// SOCIAL NOTIFICATIONS MODULE
-// =========================
-// Polls YouTube, Twitch, and TikTok for new uploads / live streams / posts
-// and sends an embed announcement to the configured Discord channel.
+// =========================================================
+// JARVIS VOICE ASSISTANT MODULE
+// =========================================================
+// 24/7 always-listening voice chat: VC audio -> Groq Whisper (STT)
+// -> Groq LLM (reuses your existing personality) -> Piper TTS -> VC playback
 //
-// Usage (from index.js):
-//   const { initSocialNotifications } = require('./socialNotifications');
-//   initSocialNotifications(client, redis, () => dashboardConfig, EmbedBuilder);
+// Drop this file next to your main bot file and require/init it from there.
+// See INTEGRATION NOTES at the bottom of this file for the 3 edits
+// you need to make in your main file.
+// =========================================================
+
+const {
+  joinVoiceChannel,
+  createAudioPlayer,
+  createAudioResource,
+  AudioPlayerStatus,
+  VoiceConnectionStatus,
+  EndBehaviorType,
+  getVoiceConnection,
+  entersState,
+  StreamType,
+} = require('@discordjs/voice');
+const prism = require('prism-media');
+const { spawn } = require('child_process');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { PassThrough } = require('stream');
+
+// =========================
+// CONFIG / TUNABLES
+// =========================
+const SILENCE_DEBOUNCE_MS = 900;     // how long someone must be silent before we treat their utterance as "done"
+const MIN_AUDIO_MS = 350;            // ignore blips shorter than this (coughs, clicks)
+const MAX_UTTERANCE_MS = 30_000;     // hard cap per utterance so one person can't hog the pipeline
+const RECONNECT_DELAY_MS = 5000;
+const PIPER_MODEL_PATH = process.env.PIPER_MODEL_PATH || '/app/piper/en_US-lessac-medium.onnx';
+const PIPER_BIN_PATH = process.env.PIPER_BIN_PATH || '/app/piper/piper';
+
+// Per-guild state
+// guildId -> { connection, player, channelId, busy: bool, lastSpeakerLock: userId|null }
+const voiceSessions = new Map();
+
+// Per-user-per-guild audio capture state while they are actively speaking
+// key = `${guildId}-${userId}` -> { chunks: Buffer[], startedAt, silenceTimer }
+const activeCaptures = new Map();
+
+// =========================
+// PIPER TTS (free, local, neural) — PERSISTENT PROCESS
+// =========================
+// Spawning a fresh `piper` process per utterance reloads the ONNX voice
+// model from disk every single time, which is exactly the 5-10 SECOND delay
+// you'd see in [Voice TIMING] piper=...ms logs. Loading a neural TTS model
+// is expensive; doing it once and keeping the process alive is the fix.
 //
-// Config shape (set via /setnotify), read live from dashboardConfig:
-//   dashboardConfig.socialNotifications[guildId] = {
-//     youtube: { channels: ['UCxxxx', ...], channelId, pingRoleId },
-//     twitch:  { streamers: ['name', ...], channelId, pingRoleId },
-//     tiktok:  { accounts: ['username', ...], channelId, pingRoleId }
-//   }
+// We keep ONE long-running piper process per (model) for the bot's whole
+// lifetime, talk to it with --json-input (one JSON line in -> one chunk of
+// raw PCM out per request), and queue requests so concurrent calls don't
+// interleave garbled audio on the same stdout stream.
+let piperProc = null;
+let piperReady = null; // resolves once the process is spawned and alive
+const piperQueue = []; // FIFO of {text, resolve, reject} so concurrent speakInVoice calls don't race on stdout
 
-const axios = require('axios');
+function ensurePiperProcess() {
+  if (piperProc && !piperProc.killed) return piperReady;
 
-const CHECK_INTERVAL_MS = 15 * 60 * 1000; // every 15 minutes
-
-// =========================
-// REDIS "LAST SEEN" HELPERS
-// =========================
-// We track the last seen video/stream/post ID per (platform, target) so we
-// never double-post after a restart or duplicate check.
-
-async function getLastSeen(redis, platform, key) {
-  try {
-    const val = await redis.get(`social-lastseen-${platform}-${key}`);
-    return val || null;
-  } catch {
-    return null;
+  if (!fs.existsSync(PIPER_BIN_PATH)) {
+    piperReady = Promise.reject(new Error(`Piper binary not found at ${PIPER_BIN_PATH}. See setup notes.`));
+    return piperReady;
   }
-}
 
-async function setLastSeen(redis, platform, key, value) {
-  try {
-    await redis.set(`social-lastseen-${platform}-${key}`, value);
-  } catch (err) {
-    console.error(`[SocialNotify] Failed to save last seen for ${platform}/${key}:`, err.message);
-  }
-}
+  piperProc = spawn(PIPER_BIN_PATH, [
+    '--model', PIPER_MODEL_PATH,
+    '--output_raw',
+    '--json-input',
+  ]);
 
-// =========================
-// SMALL HELPERS
-// =========================
-
-function truncate(str, max = 200) {
-  if (!str) return '';
-  return str.length > max ? str.slice(0, max - 1) + '…' : str;
-}
-
-async function sendAnnouncement(client, channelId, pingRoleId, embed) {
-  if (!channelId) return;
-  try {
-    const channel = await client.channels.fetch(channelId);
-    if (!channel) return;
-    const content = pingRoleId ? `<@&${pingRoleId}>` : undefined;
-    await channel.send({ content, embeds: [embed] });
-  } catch (err) {
-    console.error('[SocialNotify] Failed to send announcement:', err.message);
-  }
-}
-
-// =========================
-// YOUTUBE
-// =========================
-// Uses the YouTube Data API v3 (same YOUTUBE_API_KEY already used elsewhere
-// in the bot for /youtube and link previews).
-//
-// IMPORTANT — QUOTA: search.list costs 100 units per call. With multiple
-// channels polled every couple minutes, that blows through the default
-// 10,000 units/day quota in under an hour. Instead we use:
-//   channels.list (1 unit)      -> get the channel's "uploads" playlist ID
-//   playlistItems.list (1 unit) -> get the latest video in that playlist
-// Total: 2 units per check instead of 100 — a 50x reduction.
-// The uploads playlist ID never changes for a channel, so we cache it in
-// Redis after the first lookup and skip the channels.list call on future
-// checks, bringing steady-state cost down to just 1 unit per check.
-
-async function getUploadsPlaylistId(redis, apiKey, ytChannelId) {
-  const cacheKey = `social-uploadsplaylist-${ytChannelId}`;
-  try {
-    const cached = await redis.get(cacheKey);
-    if (cached) return cached;
-  } catch {}
-
-  const res = await axios.get('https://www.googleapis.com/youtube/v3/channels', {
-    params: {
-      key: apiKey,
-      id: ytChannelId,
-      part: 'contentDetails',
-    },
+  let stdoutBuf = Buffer.alloc(0);
+  piperProc.stdout.on('data', (chunk) => {
+    stdoutBuf = Buffer.concat([stdoutBuf, chunk]);
   });
 
-  const playlistId = res.data.items?.[0]?.contentDetails?.relatedPlaylists?.uploads;
-  if (!playlistId) return null;
+  // Piper's --output_raw with --json-input writes one continuous PCM stream;
+  // there's no built-in delimiter between utterances. To know when one
+  // utterance's audio is "done", we rely on the fact that piper writes audio
+  // synchronously per stdin line before reading the next one — so we drain
+  // stdoutBuf right before sending the *next* request, which is what was
+  // accumulated for the *previous* one.
+  piperProc.stderr.on('data', () => {}); // model load logs, ignore
 
-  try {
-    await redis.set(cacheKey, playlistId);
-  } catch {}
+  piperProc.on('exit', (code) => {
+    console.warn(`[Piper] process exited (code ${code}) — will respawn on next request`);
+    piperProc = null;
+    piperReady = null;
+    // fail anything left queued so callers don't hang forever
+    while (piperQueue.length) {
+      const { reject } = piperQueue.shift();
+      reject(new Error('Piper process exited unexpectedly'));
+    }
+  });
 
-  return playlistId;
+  piperReady = new Promise((resolve, reject) => {
+    // give piper a moment to load the model; --json-input mode doesn't print
+    // a clean "ready" signal, so we wait a short fixed delay on first boot.
+    piperProc.once('error', reject);
+    setTimeout(resolve, 100);
+  });
+
+  // drain queue serially whenever stdout goes quiet for a beat (utterance done)
+  let drainTimer = null;
+  piperProc.stdout.on('data', () => {
+    if (drainTimer) clearTimeout(drainTimer);
+    drainTimer = setTimeout(() => {
+      if (piperQueue.length === 0) return;
+      const { resolve } = piperQueue[0];
+      const audio = stdoutBuf;
+      stdoutBuf = Buffer.alloc(0);
+      piperQueue.shift();
+      resolve(audio);
+    }, 150); // 150ms of stdout silence = piper finished writing this utterance's audio
+  });
+
+  return piperReady;
 }
 
-async function checkYoutubeChannel(client, redis, EmbedBuilder, ytChannelId, targetChannelId, pingRoleId) {
-  const apiKey = process.env.YOUTUBE_API_KEY;
-  if (!apiKey) return; // silently skip — handled by one-time warning at startup
+function piperSpeak(text) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      await ensurePiperProcess();
+    } catch (err) {
+      return reject(err);
+    }
+    piperQueue.push({ text, resolve, reject });
+    // piper's --json-input expects one JSON object per line: {"text": "..."}
+    piperProc.stdin.write(JSON.stringify({ text }) + '\n');
+  });
+}
+
+// Piper's --output_raw emits 22050Hz, 16-bit, mono PCM by default for most voices.
+// Discord voice wants 48000Hz stereo Opus via createAudioResource, which will
+// transcode for us as long as we tell it the input format correctly.
+function pcmBufferToResource(pcmBuffer, inputSampleRate = 22050) {
+  const stream = new PassThrough();
+  stream.end(pcmBuffer);
+  return createAudioResource(stream, {
+    inputType: StreamType.Raw,
+    inlineVolume: false,
+    metadata: { sampleRate: inputSampleRate },
+  });
+}
+
+// NOTE: discordjs/voice's Raw StreamType expects 48000Hz stereo 16-bit PCM.
+// Piper outputs 22050Hz mono. We need to resample. Easiest no-extra-binary
+// approach: use ffmpeg (you already depend on @ffmpeg-installer/ffmpeg).
+const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+
+function resamplePcmWithFfmpeg(pcmBuffer, inRate = 22050) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(ffmpegPath, [
+      '-f', 's16le', '-ar', String(inRate), '-ac', '1', '-i', 'pipe:0',
+      '-f', 's16le', '-ar', '48000', '-ac', '2',
+      'pipe:1',
+    ]);
+    const out = [];
+    proc.stdout.on('data', (d) => out.push(d));
+    proc.stderr.on('data', () => {});
+    proc.on('error', reject);
+    proc.on('close', () => resolve(Buffer.concat(out)));
+    proc.stdin.write(pcmBuffer);
+    proc.stdin.end();
+  });
+}
+
+async function speakInVoice(session, text) {
+  if (!text || !text.trim()) return;
+  try {
+    const t0 = Date.now();
+    const rawPcm = await piperSpeak(text);
+    const t1 = Date.now();
+    const resampled = await resamplePcmWithFfmpeg(rawPcm, 22050);
+    const t2 = Date.now();
+    const resource = pcmBufferToResource(resampled, 48000);
+    session.player.play(resource);
+    await entersState(session.player, AudioPlayerStatus.Playing, 5000).catch(() => {});
+    const t3 = Date.now();
+    console.log(`[Voice TIMING] piper=${t1 - t0}ms ffmpeg_resample=${t2 - t1}ms play_start=${t3 - t2}ms`);
+    await new Promise((resolve) => {
+      session.player.once(AudioPlayerStatus.Idle, resolve);
+    });
+  } catch (err) {
+    console.error('[Voice TTS] failed:', err.message);
+  }
+}
+
+// =========================
+// GROQ WHISPER STT
+// =========================
+async function transcribeWithGroq(groq, pcmBuffer) {
+  // Wrap raw PCM (48000Hz mono after our downmix below) into a minimal WAV
+  // header so Whisper's API can read it without needing ffmpeg round-trip.
+  const wavBuffer = pcmToWav(pcmBuffer, 48000, 1, 16);
+  const tmpPath = path.join(os.tmpdir(), `jarvis-stt-${Date.now()}-${Math.random().toString(36).slice(2)}.wav`);
+  fs.writeFileSync(tmpPath, wavBuffer);
+  try {
+    const transcription = await groq.audio.transcriptions.create({
+      file: fs.createReadStream(tmpPath),
+      model: 'whisper-large-v3-turbo',
+      response_format: 'text',
+      language: 'en',
+    });
+    return (typeof transcription === 'string' ? transcription : transcription.text || '').trim();
+  } finally {
+    fs.unlink(tmpPath, () => {});
+  }
+}
+
+function pcmToWav(pcmData, sampleRate, channels, bitDepth) {
+  const byteRate = sampleRate * channels * (bitDepth / 8);
+  const blockAlign = channels * (bitDepth / 8);
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0);
+  header.writeUInt32LE(36 + pcmData.length, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20); // PCM
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitDepth, 34);
+  header.write('data', 36);
+  header.writeUInt32LE(pcmData.length, 40);
+  return Buffer.concat([header, pcmData]);
+}
+
+// =========================
+// CORE: subscribe to a user's audio in VC
+// =========================
+function listenToUser(session, userId, receiver, deps) {
+  const { groq, getReplyForVoice, guildId } = deps;
+  const capKey = `${guildId}-${userId}`;
+
+  // Already capturing this user — discordjs/voice fires speaking start once
+  // per "speaking session", so this guards against double-subscription.
+  if (activeCaptures.has(capKey)) return;
+
+  const opusStream = receiver.subscribe(userId, {
+    end: { behavior: EndBehaviorType.Manual }, // we manage end ourselves via silence debounce
+  });
+  const pcmStream = opusStream.pipe(new prism.opus.Decoder({ frameSize: 960, channels: 2, rate: 48000 }));
+
+  const capture = { chunks: [], startedAt: Date.now(), silenceTimer: null, opusStream, pcmStream };
+  activeCaptures.set(capKey, capture);
+
+  const hardStopTimer = setTimeout(() => finalizeCapture(capKey, deps), MAX_UTTERANCE_MS);
+
+  pcmStream.on('data', (chunk) => {
+    capture.chunks.push(chunk);
+    if (capture.silenceTimer) clearTimeout(capture.silenceTimer);
+    capture.silenceTimer = setTimeout(() => {
+      clearTimeout(hardStopTimer);
+      finalizeCapture(capKey, deps);
+    }, SILENCE_DEBOUNCE_MS);
+  });
+
+  pcmStream.on('error', () => cleanupCapture(capKey));
+  opusStream.on('error', () => cleanupCapture(capKey));
+}
+
+function cleanupCapture(capKey) {
+  const capture = activeCaptures.get(capKey);
+  if (!capture) return;
+  if (capture.silenceTimer) clearTimeout(capture.silenceTimer);
+  try { capture.opusStream.destroy(); } catch {}
+  try { capture.pcmStream.destroy(); } catch {}
+  activeCaptures.delete(capKey);
+}
+
+async function finalizeCapture(capKey, deps) {
+  const capture = activeCaptures.get(capKey);
+  if (!capture) return;
+  cleanupCapture(capKey);
+
+  const durationMs = Date.now() - capture.startedAt;
+  if (durationMs < MIN_AUDIO_MS || capture.chunks.length === 0) return;
+
+  const [guildId, userId] = capKey.split('-');
+  const session = voiceSessions.get(guildId);
+  if (!session) return;
+
+  // "Only respond to most recent speaker, drop overlaps" —
+  // claim the lock for this utterance; if someone else's finalize beats us
+  // to it while we're transcribing, we just let this run anyway since the
+  // lock here is about *not starting a reply while one is already playing*,
+  // not about dropping audio capture itself.
+  const pcmBuffer = Buffer.concat(capture.chunks);
 
   try {
-    const uploadsPlaylistId = await getUploadsPlaylistId(redis, apiKey, ytChannelId);
-    if (!uploadsPlaylistId) return;
+    const { groq, getReplyForVoice } = deps;
+    const tCaptureEnd = Date.now();
+    const transcript = await transcribeWithGroq(groq, pcmBuffer);
+    const tSttDone = Date.now();
+    if (!transcript || transcript.length < 2) return;
 
-    const res = await axios.get('https://www.googleapis.com/youtube/v3/playlistItems', {
-      params: {
-        key: apiKey,
-        playlistId: uploadsPlaylistId,
-        part: 'snippet',
-        maxResults: 1,
-      },
-    });
+    console.log(`[Voice] ${userId} said: "${transcript}"`);
+    console.log(`[Voice TIMING] stt=${tSttDone - tCaptureEnd}ms (audio_ms=${durationMs})`);
 
-    const item = res.data.items?.[0];
-    if (!item) return;
-
-    const videoId = item.snippet.resourceId?.videoId;
-    if (!videoId) return;
-
-    const lastSeen = await getLastSeen(redis, 'youtube', ytChannelId);
-
-    // First run for this channel — store baseline, don't announce old content
-    if (lastSeen === null) {
-      await setLastSeen(redis, 'youtube', ytChannelId, videoId);
+    // Drop overlap: if JARVIS is currently speaking/processing, skip this
+    // utterance entirely rather than queueing it.
+    if (session.busy) {
+      console.log('[Voice] busy — dropping overlapping utterance');
       return;
     }
+    session.busy = true;
+    session.lastSpeakerLock = userId;
 
-    if (lastSeen === videoId) return; // nothing new
-
-    await setLastSeen(redis, 'youtube', ytChannelId, videoId);
-
-    const { title, channelTitle, thumbnails, publishedAt } = item.snippet;
-    const embed = new EmbedBuilder()
-      .setColor(0xff0000)
-      .setAuthor({ name: `${channelTitle} just posted a new video!` })
-      .setTitle(title)
-      .setURL(`https://youtube.com/watch?v=${videoId}`)
-      .setImage(thumbnails?.high?.url || thumbnails?.default?.url)
-      .setFooter({ text: 'JARVIS • YouTube Notifications' })
-      .setTimestamp(new Date(publishedAt));
-
-    await sendAnnouncement(client, targetChannelId, pingRoleId, embed);
+    try {
+      const tLlmStart = Date.now();
+      const replyText = await getReplyForVoice({ guildId, userId, transcript });
+      const tLlmDone = Date.now();
+      console.log(`[Voice TIMING] llm=${tLlmDone - tLlmStart}ms total_before_tts=${tLlmDone - tCaptureEnd}ms`);
+      if (replyText) await speakInVoice(session, replyText);
+    } finally {
+      session.busy = false;
+      session.lastSpeakerLock = null;
+    }
   } catch (err) {
-    console.error(`[SocialNotify] YouTube check failed for ${ytChannelId}:`, err?.response?.data?.error?.message || err.message);
+    console.error('[Voice] pipeline error:', err.message);
+    session.busy = false;
   }
 }
 
 // =========================
-// TWITCH
-// =========================
-// Requires TWITCH_CLIENT_ID + TWITCH_CLIENT_SECRET (app access token flow).
-// If not configured, Twitch checks are skipped entirely (logged once).
-
-let twitchToken = null;
-let twitchTokenExpiry = 0;
-let twitchWarned = false;
-
-async function getTwitchToken() {
-  const clientId = process.env.TWITCH_CLIENT_ID;
-  const clientSecret = process.env.TWITCH_CLIENT_SECRET;
-  if (!clientId || !clientSecret) {
-    if (!twitchWarned) {
-      console.warn('[SocialNotify] TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET not set — Twitch notifications disabled.');
-      twitchWarned = true;
-    }
-    return null;
-  }
-
-  if (twitchToken && Date.now() < twitchTokenExpiry) return twitchToken;
-
-  try {
-    const res = await axios.post('https://id.twitch.tv/oauth2/token', null, {
-      params: {
-        client_id: clientId,
-        client_secret: clientSecret,
-        grant_type: 'client_credentials',
-      },
-    });
-    twitchToken = res.data.access_token;
-    // refresh a bit early to avoid edge-of-expiry failures
-    twitchTokenExpiry = Date.now() + (res.data.expires_in - 60) * 1000;
-    return twitchToken;
-  } catch (err) {
-    console.error('[SocialNotify] Failed to get Twitch token:', err?.response?.data || err.message);
-    return null;
-  }
-}
-
-async function checkTwitchStreamer(client, redis, EmbedBuilder, username, targetChannelId, pingRoleId) {
-  const clientId = process.env.TWITCH_CLIENT_ID;
-  const token = await getTwitchToken();
-  if (!token || !clientId) return;
-
-  try {
-    const res = await axios.get('https://api.twitch.tv/helix/streams', {
-      params: { user_login: username },
-      headers: {
-        'Client-ID': clientId,
-        Authorization: `Bearer ${token}`,
-      },
-    });
-
-    const stream = res.data.data?.[0];
-    const lastSeen = await getLastSeen(redis, 'twitch', username);
-
-    if (!stream) {
-      // Not live — clear "currently live" marker so next time they go live we announce again
-      if (lastSeen && lastSeen !== 'offline') {
-        await setLastSeen(redis, 'twitch', username, 'offline');
-      }
-      return;
-    }
-
-    // Already announced this specific stream session
-    if (lastSeen === stream.id) return;
-
-    await setLastSeen(redis, 'twitch', username, stream.id);
-
-    const thumbnailUrl = (stream.thumbnail_url || '')
-      .replace('{width}', '1280')
-      .replace('{height}', '720');
-
-    const embed = new EmbedBuilder()
-      .setColor(0x9146ff)
-      .setAuthor({ name: `${stream.user_name} is now live on Twitch!` })
-      .setTitle(stream.title || 'Untitled stream')
-      .setURL(`https://twitch.tv/${username}`)
-      .addFields(
-        { name: '🎮 Game', value: stream.game_name || 'Unknown', inline: true },
-        { name: '👀 Viewers', value: `${stream.viewer_count ?? 0}`, inline: true }
-      )
-      .setImage(thumbnailUrl ? `${thumbnailUrl}?t=${Date.now()}` : null)
-      .setFooter({ text: 'JARVIS • Twitch Notifications' })
-      .setTimestamp();
-
-    await sendAnnouncement(client, targetChannelId, pingRoleId, embed);
-  } catch (err) {
-    console.error(`[SocialNotify] Twitch check failed for ${username}:`, err?.response?.data || err.message);
-  }
-}
-
-// =========================
-// TIKTOK
-// =========================
-// TikTok has no official free public API for "latest video by username".
-// This does a best-effort fetch of the public profile page and pulls the
-// most recent video ID out of the embedded page data. TikTok changes its
-// page structure often, so this is the least reliable of the three checks
-// and may silently stop working if TikTok changes their site — that's a
-// TikTok-side limitation, not a bug in the bot's logic.
-
-let tiktokWarned = false;
-
-async function checkTiktokAccount(client, redis, EmbedBuilder, username, targetChannelId, pingRoleId) {
-  try {
-    const res = await axios.get(`https://www.tiktok.com/@${username}`, {
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
-      },
-      timeout: 10000,
-    });
-
-    const html = res.data;
-    const match = html.match(/"webapp\.video-detail"[\s\S]*?"id":"(\d+)"/) ||
-      html.match(/\/video\/(\d+)/);
-
-    if (!match) {
-      if (!tiktokWarned) {
-        console.warn(`[SocialNotify] Could not parse TikTok page for @${username} — TikTok may have changed their page structure.`);
-        tiktokWarned = true;
-      }
-      return;
-    }
-
-    const videoId = match[1];
-    const lastSeen = await getLastSeen(redis, 'tiktok', username);
-
-    if (lastSeen === null) {
-      await setLastSeen(redis, 'tiktok', username, videoId);
-      return;
-    }
-
-    if (lastSeen === videoId) return;
-
-    await setLastSeen(redis, 'tiktok', username, videoId);
-
-    const embed = new EmbedBuilder()
-      .setColor(0x000000)
-      .setAuthor({ name: `@${username} just posted a new TikTok!` })
-      .setDescription(`🎬 New video from **@${username}**`)
-      .setURL(`https://www.tiktok.com/@${username}/video/${videoId}`)
-      .setFooter({ text: 'JARVIS • TikTok Notifications' })
-      .setTimestamp();
-
-    await sendAnnouncement(client, targetChannelId, pingRoleId, embed);
-  } catch (err) {
-    console.error(`[SocialNotify] TikTok check failed for @${username}:`, err.message);
-  }
-}
-
-// =========================
-// MAIN POLL LOOP
-// =========================
-
-async function pollAll(client, redis, getDashboardConfig, EmbedBuilder) {
-  const dashboardConfig = getDashboardConfig();
-  const allConfigs = dashboardConfig.socialNotifications || {};
-
-  for (const guildId of Object.keys(allConfigs)) {
-    const gc = allConfigs[guildId];
-    if (!gc) continue;
-
-    // YouTube
-    if (gc.youtube?.channels?.length && gc.youtube.channelId) {
-      for (const ytChannelId of gc.youtube.channels) {
-        await checkYoutubeChannel(client, redis, EmbedBuilder, ytChannelId, gc.youtube.channelId, gc.youtube.pingRoleId);
-      }
-    }
-
-    // Twitch
-    if (gc.twitch?.streamers?.length && gc.twitch.channelId) {
-      for (const username of gc.twitch.streamers) {
-        await checkTwitchStreamer(client, redis, EmbedBuilder, username, gc.twitch.channelId, gc.twitch.pingRoleId);
-      }
-    }
-
-    // TikTok
-    if (gc.tiktok?.accounts?.length && gc.tiktok.channelId) {
-      for (const username of gc.tiktok.accounts) {
-        await checkTiktokAccount(client, redis, EmbedBuilder, username, gc.tiktok.channelId, gc.tiktok.pingRoleId);
-      }
-    }
-  }
-}
-
-// =========================
-// PUBLIC ENTRY POINT
+// PUBLIC API
 // =========================
 
 /**
- * Starts the social notification polling loop.
- *
- * @param {Client} client - the Discord.js client
- * @param {Redis} redis - the Upstash Redis client instance
- * @param {Function} getDashboardConfig - function returning the live dashboardConfig object
- * @param {EmbedBuilder} EmbedBuilder - discord.js EmbedBuilder class
+ * Join (or move to) a voice channel and start always-listening mode.
+ * Call this on bot ready for every guild with a configured voice channel,
+ * and from the /setvoicechannel command handler.
  */
-function initSocialNotifications(client, redis, getDashboardConfig, EmbedBuilder) {
-  console.log(`✅ Social notifications initialized (checking every ${CHECK_INTERVAL_MS / 60000} min)`);
+async function joinAndListen(client, guild, channelId, deps) {
+  const existing = voiceSessions.get(guild.id);
+  if (existing && existing.channelId === channelId && existing.connection.state.status !== VoiceConnectionStatus.Destroyed) {
+    return existing; // already connected to the right channel
+  }
+  if (existing) {
+    try { existing.connection.destroy(); } catch {}
+    voiceSessions.delete(guild.id);
+  }
 
-  // Run once shortly after startup, then on the regular interval.
-  setTimeout(() => {
-    pollAll(client, redis, getDashboardConfig, EmbedBuilder).catch(err =>
-      console.error('[SocialNotify] Initial poll failed:', err.message)
-    );
-  }, 15_000);
+  const connection = joinVoiceChannel({
+    channelId,
+    guildId: guild.id,
+    adapterCreator: guild.voiceAdapterCreator,
+    selfDeaf: false, // must hear users to transcribe them
+    selfMute: false,
+  });
 
-  setInterval(() => {
-    pollAll(client, redis, getDashboardConfig, EmbedBuilder).catch(err =>
-      console.error('[SocialNotify] Poll loop failed:', err.message)
-    );
-  }, CHECK_INTERVAL_MS);
+  const player = createAudioPlayer();
+  connection.subscribe(player);
+
+  const session = { connection, player, channelId, busy: false, lastSpeakerLock: null };
+  voiceSessions.set(guild.id, session);
+
+  connection.on(VoiceConnectionStatus.Disconnected, async () => {
+    try {
+      await Promise.race([
+        entersState(connection, VoiceConnectionStatus.Signalling, 5000),
+        entersState(connection, VoiceConnectionStatus.Connecting, 5000),
+      ]);
+    } catch {
+      // real disconnect (kicked, channel deleted, etc.) — try a clean rejoin
+      console.warn(`[Voice] lost connection in guild ${guild.id}, retrying in ${RECONNECT_DELAY_MS}ms`);
+      voiceSessions.delete(guild.id);
+      setTimeout(() => {
+        joinAndListen(client, guild, channelId, deps).catch((e) =>
+          console.error('[Voice] reconnect failed:', e.message)
+        );
+      }, RECONNECT_DELAY_MS);
+    }
+  });
+
+  // Subscribe to every current + future speaker in the channel
+  const receiver = connection.receiver;
+  receiver.speaking.on('start', (userId) => {
+    // ignore the bot itself and anyone already being captured
+    if (userId === client.user.id) return;
+    listenToUser(session, userId, receiver, { ...deps, guildId: guild.id });
+  });
+
+  console.log(`[Voice] joined channel ${channelId} in guild ${guild.id} — always-listening active`);
+  return session;
 }
 
-module.exports = { initSocialNotifications };
+function leaveVoice(guildId) {
+  const session = voiceSessions.get(guildId);
+  if (!session) return false;
+  try { session.connection.destroy(); } catch {}
+  voiceSessions.delete(guildId);
+  // clean any in-flight captures for this guild
+  for (const key of activeCaptures.keys()) {
+    if (key.startsWith(`${guildId}-`)) cleanupCapture(key);
+  }
+  return true;
+}
+
+/**
+ * Call this once after client login + dashboardConfig load to auto-join
+ * every guild that has a voiceChannels[guildId] configured (true 24/7).
+ */
+async function initVoiceAssistant(client, getDashboardConfig, deps) {
+  const cfg = getDashboardConfig();
+  const voiceChannels = cfg.voiceChannels || {};
+  for (const [guildId, channelId] of Object.entries(voiceChannels)) {
+    try {
+      const guild = await client.guilds.fetch(guildId);
+      await joinAndListen(client, guild, channelId, deps);
+    } catch (err) {
+      console.error(`[Voice] failed to auto-join guild ${guildId}:`, err.message);
+    }
+  }
+}
+
+module.exports = {
+  joinAndListen,
+  leaveVoice,
+  initVoiceAssistant,
+  voiceSessions,
+};
+
+// =========================================================
+// INTEGRATION NOTES — edits needed in your main bot file
+// =========================================================
+//
+// 1) At the top of your main file:
+//
+//    const { joinAndListen, leaveVoice, initVoiceAssistant } = require('./voiceAssistant');
+//
+// 2) Add a slash command (next to your other dashboardConfig-driven ones):
+//
+//    new SlashCommandBuilder()
+//      .setName('setvoicechannel')
+//      .setDescription('Set the voice channel JARVIS joins 24/7 and listens in')
+//      .addChannelOption(o => o.setName('channel').setDescription('Voice channel').setRequired(true).addChannelTypes(2))
+//      .setDMPermission(false),
+//    new SlashCommandBuilder()
+//      .setName('leavevoice')
+//      .setDescription('Make JARVIS leave the voice channel')
+//      .setDMPermission(false),
+//
+//    Handler:
+//
+//    if (interaction.commandName === 'setvoicechannel') {
+//      if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+//      if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need Manage Server permission.', flags: 64 });
+//      const channel = interaction.options.getChannel('channel');
+//      dashboardConfig.voiceChannels = dashboardConfig.voiceChannels || {};
+//      dashboardConfig.voiceChannels[interaction.guild.id] = channel.id;
+//      await saveDashboardConfig(dashboardConfig);
+//      await joinAndListen(client, interaction.guild, channel.id, voiceDeps);
+//      return interaction.reply(`✅ JARVIS will now stay in <#${channel.id}> 24/7 and listen for voice chat.`);
+//    }
+//
+//    if (interaction.commandName === 'leavevoice') {
+//      if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+//      if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need Manage Server permission.', flags: 64 });
+//      delete dashboardConfig.voiceChannels?.[interaction.guild.id];
+//      await saveDashboardConfig(dashboardConfig);
+//      leaveVoice(interaction.guild.id);
+//      return interaction.reply('👋 Left the voice channel.');
+//    }
+//
+// 3) In your clientReady handler, after loadDashboardConfig():
+//
+//    const voiceDeps = {
+//      groq, // your existing groq client (works fine for Whisper too — same OpenAI-compatible client)
+//      getReplyForVoice: async ({ guildId, userId, transcript }) => {
+//        // Reuse your existing personality/mode system. Kept deliberately
+//        // simple — swap in your `system` prompt builder from messageCreate
+//        // if you want VC replies to share memory/modes with text chat.
+//        const activeMode = getActiveMode(guildId);
+//        const modeData = MODES[activeMode];
+//        const res = await groq.chat.completions.create({
+//          model: 'llama-3.1-8b-instant',
+//          messages: [
+//            { role: 'system', content: `You are JARVIS speaking out loud in a Discord voice channel. ${modeData.prompt} Keep replies SHORT — 1-2 sentences, since this gets read aloud via TTS. No emojis, no markdown, no asterisks — plain spoken text only.` },
+//            { role: 'user', content: transcript },
+//          ],
+//          temperature: 0.85,
+//          max_tokens: 120,
+//        });
+//        return res.choices[0].message.content;
+//      },
+//    };
+//
+//    await initVoiceAssistant(client, () => dashboardConfig, voiceDeps);
+//
+// =========================================================
+// REQUIRED DEPLOYMENT SETUP (Railway, Dockerfile-based service)
+// =========================================================
+//
+// Railway needs to build a container that has Piper installed. Use a
+// Dockerfile (not pure Nixpacks) so you can fetch the Piper binary + model:
+//
+//   FROM node:20-bookworm-slim
+//   RUN apt-get update && apt-get install -y wget tar ca-certificates && rm -rf /var/lib/apt/lists/*
+//   WORKDIR /app
+//   # Piper binary (Linux x64) — check https://github.com/rhasspy/piper/releases for latest
+//   RUN wget -q https://github.com/rhasspy/piper/releases/latest/download/piper_linux_x86_64.tar.gz \
+//       && tar -xzf piper_linux_x86_64.tar.gz -C /app \
+//       && mv /app/piper /app/piper-bin \
+//       && mkdir -p /app/piper && mv /app/piper-bin/* /app/piper/ \
+//       && rm piper_linux_x86_64.tar.gz
+//   # A voice model — lessac-medium is a good free default
+//   RUN wget -q -O /app/piper/en_US-lessac-medium.onnx \
+//       https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx \
+//       && wget -q -O /app/piper/en_US-lessac-medium.onnx.json \
+//       https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json
+//   COPY package*.json ./
+//   RUN npm install --production
+//   COPY . .
+//   CMD ["node", "index.js"]
+//
+// Set Railway's builder to "Dockerfile" in service settings.
+// Env vars needed: PIPER_BIN_PATH=/app/piper/piper, PIPER_MODEL_PATH=/app/piper/en_US-lessac-medium.onnx
+// (the module already defaults to these paths, so you may not need to set them at all)
+//
+// npm packages to add: prism-media, @discordjs/voice, @ffmpeg-installer/ffmpeg
+// (you already have these in your main file's requires — just confirm they're in package.json)
+//
+// Also required at the OS level inside the container: libopus (for prism-media's
+// opus decoding) and ffmpeg (already covered via @ffmpeg-installer/ffmpeg).
+// libopus usually needs: apt-get install -y libopus0 libopus-dev — add that to
+// the Dockerfile's apt-get install line above if you hit Opus decode errors.
+// =========================================================
