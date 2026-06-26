@@ -34,7 +34,7 @@ const SILENCE_DEBOUNCE_MS = 900;     // how long someone must be silent before w
 const MIN_AUDIO_MS = 350;            // ignore blips shorter than this (coughs, clicks)
 const MAX_UTTERANCE_MS = 30_000;     // hard cap per utterance so one person can't hog the pipeline
 const RECONNECT_DELAY_MS = 5000;
-const PIPER_MODEL_PATH = process.env.PIPER_MODEL_PATH || '/app/piper/en_US-ryan-medium.onnx';
+const PIPER_MODEL_PATH = process.env.PIPER_MODEL_PATH || '/app/piper/en_US-jarvis-medium.onnx';
 const PIPER_BIN_PATH = process.env.PIPER_BIN_PATH || '/app/piper/piper';
 
 // Per-guild state
