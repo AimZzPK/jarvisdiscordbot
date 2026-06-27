@@ -857,6 +857,125 @@ async function createTicketChannel(guild, user, reason, panelId = 'support', ans
 }
 
 // =========================
+// ── APPLICATION HELPERS ──
+// =========================
+
+/**
+ * Get an application panel's config from dashboardConfig by panelId for a given guild.
+ * Falls back to a sane default if not found so callers never have to null-check.
+ */
+function getApplicationPanel(guildId, panelId) {
+  const panels = dashboardConfig.applicationPanels?.[guildId];
+  if (Array.isArray(panels)) {
+    const found = panels.find(p => p.id === panelId);
+    if (found) return found;
+  }
+  return {
+    id: panelId || 'application',
+    name: 'Application',
+    title: '📋 Apply Now',
+    description: 'Click the button below to fill out an application.',
+    buttonLabel: '📋 Apply',
+    color: '#5865f2',
+    questions: ['Why do you want this role?'],
+    submitChannelId: null,
+    cooldownHours: 0,
+  };
+}
+
+/**
+ * List all application panels for a guild.
+ */
+function getApplicationPanelList(guildId) {
+  const panels = dashboardConfig.applicationPanels?.[guildId];
+  if (Array.isArray(panels) && panels.length > 0) return panels;
+  return [];
+}
+
+/**
+ * Check + record per-panel cooldown for a user. Returns null if allowed,
+ * or a human-readable string describing how long until they can re-apply.
+ */
+async function checkApplicationCooldown(guildId, panelId, userId, cooldownHours) {
+  if (!cooldownHours || cooldownHours <= 0) return null;
+  const key = `appcooldown-${guildId}-${panelId}-${userId}`;
+  const last = await redis.get(key);
+  if (!last) return null;
+  const lastTs = parseInt(last);
+  const msLeft = (lastTs + cooldownHours * 60 * 60 * 1000) - Date.now();
+  if (msLeft <= 0) return null;
+  const hoursLeft = Math.ceil(msLeft / (60 * 60 * 1000));
+  return hoursLeft;
+}
+
+async function setApplicationCooldown(guildId, panelId, userId) {
+  const key = `appcooldown-${guildId}-${panelId}-${userId}`;
+  await redis.set(key, Date.now().toString());
+}
+
+/**
+ * Submit an application: posts an embed with all Q&A to the panel's
+ * configured submission channel, with Accept/Deny buttons for staff.
+ */
+async function submitApplication(guild, user, panelId, answers) {
+  const panel = getApplicationPanel(guild.id, panelId);
+
+  if (!panel.submitChannelId) {
+    return { error: '❌ This application is not fully configured (no submission channel set). Contact a server admin.' };
+  }
+
+  let targetChannel;
+  try {
+    targetChannel = await client.channels.fetch(panel.submitChannelId);
+  } catch {
+    return { error: '❌ Could not find the submission channel. Contact a server admin.' };
+  }
+
+  const color = parseInt((panel.color || '#5865f2').replace(/^#/, ''), 16) || 0x5865f2;
+  const answerFields = answers.map(a => ({
+    name: `❓ ${a.question}`,
+    value: (a.answer || 'No answer provided').slice(0, 1024),
+  }));
+
+  const embed = new EmbedBuilder()
+    .setColor(color)
+    .setTitle(`📋 ${panel.name || panel.title || 'New Application'}`)
+    .setThumbnail(user.displayAvatarURL({ dynamic: true }))
+    .addFields(
+      { name: '👤 Applicant', value: `<@${user.id}> (${user.tag})`, inline: true },
+      { name: '🕒 Submitted', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true },
+      { name: '📂 Panel', value: panel.id, inline: true },
+      ...answerFields,
+      { name: 'Status', value: '⏳ Pending review' }
+    )
+    .setFooter({ text: 'JARVIS Applications' })
+    .setTimestamp();
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`app_accept_${panel.id}_${user.id}`).setLabel('✅ Accept').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`app_deny_${panel.id}_${user.id}`).setLabel('❌ Deny').setStyle(ButtonStyle.Danger)
+  );
+
+  try {
+    await targetChannel.send({ embeds: [embed], components: [row] });
+  } catch (err) {
+    console.error('[Application] failed to post submission:', err.message);
+    return { error: '❌ Failed to post the application. Make sure I can send messages in the submission channel.' };
+  }
+
+  await setApplicationCooldown(guild.id, panel.id, user.id);
+
+  await pushLogEvent(guild.id, {
+    type: 'applicationSubmit',
+    userId: user.id,
+    username: user.tag,
+    detail: `Submitted "${panel.name || panel.id}" application`
+  });
+
+  return { ok: true, channelId: targetChannel.id };
+}
+
+// =========================
 // SLASH COMMANDS
 // =========================
 const commands = [
@@ -1112,6 +1231,20 @@ new SlashCommandBuilder()
     .setName('listpanels').setDescription('List all ticket panels configured for this server')
     .setDMPermission(false),
 
+  // ── APPLICATION COMMANDS ────────────────────────────────────────
+  new SlashCommandBuilder()
+    .setName('setupapplication').setDescription('Post an application panel embed in this channel (admin only)')
+    .addStringOption(o =>
+      o.setName('panel')
+        .setDescription('Application panel ID to post. Leave blank to see all panels.')
+        .setRequired(false)
+    )
+    .setDMPermission(false),
+
+  new SlashCommandBuilder()
+    .setName('listapplications').setDescription('List all application panels configured for this server')
+    .setDMPermission(false),
+
 
  new SlashCommandBuilder()
   .setName('broadcast')
@@ -1363,6 +1496,102 @@ if (interaction.isButton() && interaction.customId.startsWith('panel_create_tick
   return interaction.showModal(modal);
 }
 
+  // ── Application panel apply button ──────────────────────────────
+  // customId format: app_create__<panelId>
+  if (interaction.isButton() && interaction.customId.startsWith('app_create__')) {
+    if (!interaction.guild) return;
+    const panelId = interaction.customId.split('__')[1] || 'application';
+    const panel = getApplicationPanel(interaction.guild.id, panelId);
+
+    const hoursLeft = await checkApplicationCooldown(interaction.guild.id, panel.id, interaction.user.id, panel.cooldownHours);
+    if (hoursLeft) {
+      return interaction.reply({ content: `⏳ You've already applied recently. You can apply again in **${hoursLeft} hour(s)**.`, flags: 64 });
+    }
+
+    if (panel.requireRoleId) {
+      const hasRole = interaction.member?.roles.cache.has(panel.requireRoleId);
+      if (!hasRole) return interaction.reply({ content: `❌ You don't have the required role to apply for this.`, flags: 64 });
+    }
+
+    const questions = panel.questions || [];
+    if (questions.length === 0) {
+      return interaction.reply({ content: '❌ This application has no questions configured. Contact a server admin.', flags: 64 });
+    }
+
+    const modal = new ModalBuilder()
+      .setCustomId(`application_modal__${panel.id}`)
+      .setTitle((panel.name || panel.title || 'Application').slice(0, 45));
+
+    questions.slice(0, 5).forEach((q, i) => {
+      const input = new TextInputBuilder()
+        .setCustomId(`aq_${i}`)
+        .setLabel(q.slice(0, 45))
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(true)
+        .setMaxLength(1000);
+      modal.addComponents(new ActionRowBuilder().addComponents(input));
+    });
+
+    return interaction.showModal(modal);
+  }
+
+  // ── Application accept/deny buttons ─────────────────────────────
+  // customId format: app_accept_<panelId>_<applicantId>  /  app_deny_<panelId>_<applicantId>
+  if (interaction.isButton() && (interaction.customId.startsWith('app_accept_') || interaction.customId.startsWith('app_deny_'))) {
+    if (!interaction.guild) return;
+    if (!interaction.member.permissions.has('ManageGuild')) {
+      return interaction.reply({ content: '❌ Only staff with **Manage Server** permission can decide on applications.', flags: 64 });
+    }
+
+    const isAccept = interaction.customId.startsWith('app_accept_');
+    const rest = interaction.customId.replace(isAccept ? 'app_accept_' : 'app_deny_', '');
+    const lastUnderscore = rest.lastIndexOf('_');
+    const panelId = rest.slice(0, lastUnderscore);
+    const applicantId = rest.slice(lastUnderscore + 1);
+    const panel = getApplicationPanel(interaction.guild.id, panelId);
+
+    const oldEmbed = interaction.message.embeds[0];
+    if (!oldEmbed) return interaction.reply({ content: '❌ Could not read this application.', flags: 64 });
+
+    const statusText = isAccept
+      ? `✅ Accepted by <@${interaction.user.id}>`
+      : `❌ Denied by <@${interaction.user.id}>`;
+
+    const fields = oldEmbed.fields.map(f => f.name === 'Status' ? { name: 'Status', value: statusText } : f);
+    const updatedEmbed = EmbedBuilder.from(oldEmbed)
+      .setColor(isAccept ? 0x22c55e : 0xed4245)
+      .setFields(fields);
+
+    const disabledRow = new ActionRowBuilder().addComponents(
+      ButtonBuilder.from(interaction.message.components[0].components[0]).setDisabled(true),
+      ButtonBuilder.from(interaction.message.components[0].components[1]).setDisabled(true)
+    );
+
+    await interaction.update({ embeds: [updatedEmbed], components: [disabledRow] });
+
+    try {
+      const applicant = await client.users.fetch(applicantId);
+      const dmEmbed = new EmbedBuilder()
+        .setColor(isAccept ? 0x22c55e : 0xed4245)
+        .setTitle(isAccept ? '✅ Application Accepted' : '❌ Application Denied')
+        .setDescription(`Your **${panel.name || panel.title || 'application'}** for **${interaction.guild.name}** has been ${isAccept ? 'accepted' : 'denied'}.`)
+        .setFooter({ text: `JARVIS Applications • ${interaction.guild.name}` })
+        .setTimestamp();
+      await applicant.send({ embeds: [dmEmbed] });
+    } catch (err) {
+      console.error('[Application] failed to DM applicant:', err.message);
+    }
+
+    await pushLogEvent(interaction.guild.id, {
+      type: 'applicationDecision',
+      userId: applicantId,
+      username: applicantId,
+      detail: `${isAccept ? 'Accepted' : 'Denied'} "${panel.name || panel.id}" application by ${interaction.user.tag}`
+    });
+
+    return;
+  }
+
   // ── Close ticket button ────────────────────────────────────────
   if (interaction.isButton() && interaction.customId.startsWith('closeticket_')) {
     if (!interaction.guild) return;
@@ -1551,6 +1780,30 @@ if (interaction.isModalSubmit() && interaction.customId.startsWith('ticket_modal
   } catch (err) {
     console.error('[Ticket Modal] create failed:', err);
     return interaction.editReply({ content: '❌ Failed to create ticket. Make sure I have **Manage Channels** permission.' });
+  }
+}
+
+// ── Application modal submit ─────────────────────────────────────
+if (interaction.isModalSubmit() && interaction.customId.startsWith('application_modal__')) {
+  if (!interaction.guild) return;
+  const panelId = interaction.customId.split('__')[1] || 'application';
+  const panel = getApplicationPanel(interaction.guild.id, panelId);
+  const questions = panel.questions || [];
+
+  const answers = questions.map((q, i) => ({
+    question: q,
+    answer: interaction.fields.getTextInputValue(`aq_${i}`) || 'No answer',
+  }));
+
+  await interaction.deferReply({ flags: 64 });
+
+  try {
+    const result = await submitApplication(interaction.guild, interaction.user, panelId, answers);
+    if (result.error) return interaction.editReply({ content: result.error });
+    return interaction.editReply({ content: `✅ Your application has been submitted! Staff will review it soon.` });
+  } catch (err) {
+    console.error('[Application Modal] submit failed:', err);
+    return interaction.editReply({ content: '❌ Failed to submit your application. Contact a server admin.' });
   }
 }
 
@@ -1810,6 +2063,8 @@ if (interaction.commandName === 'giveaway') {
 /setticketcategory - set ticket category
 /setuppanel [panel] - post a ticket panel embed
 /listpanels - list all configured panels
+/setupapplication [panel] - post an application panel embed
+/listapplications - list all configured application panels
 /feedback /reviews /invite /portfolio /websites /dashboard
 /broadcast
 `)]
@@ -2108,7 +2363,7 @@ if (interaction.commandName === 'ban') {
       const existing = await redis.get(key);
       const logs = Array.isArray(existing) ? existing : (existing ? JSON.parse(existing) : []);
       if (logs.length === 0) return interaction.reply({ content: '📭 No log events recorded yet.', flags: 64 });
-      const typeEmoji = { join: '📥', leave: '📤', ban: '🔨', unban: '✅', kick: '👢', timeout: '🔇', messageDelete: '🗑️', messageEdit: '✏️', channelCreate: '📢', channelDelete: '🗑️', roleCreate: '🎭', roleDelete: '🗑️', voiceJoin: '🔊', voiceLeave: '🔇', voiceMove: '🔀', warn: '⚠️', nickChange: '📝', automod: '🛡️', ticketOpen: '🎫', ticketClose: '🔒' };
+      const typeEmoji = { join: '📥', leave: '📤', ban: '🔨', unban: '✅', kick: '👢', timeout: '🔇', messageDelete: '🗑️', messageEdit: '✏️', channelCreate: '📢', channelDelete: '🗑️', roleCreate: '🎭', roleDelete: '🗑️', voiceJoin: '🔊', voiceLeave: '🔇', voiceMove: '🔀', warn: '⚠️', nickChange: '📝', automod: '🛡️', ticketOpen: '🎫', ticketClose: '🔒', applicationSubmit: '📋', applicationDecision: '🗳️' };
       const recent = logs.slice(-10).reverse();
       const lines = recent.map(e => { const emoji = typeEmoji[e.type] || '📋'; const time = `<t:${Math.floor(e.timestamp / 1000)}:R>`; const user = e.username ? `**${e.username}**` : ''; return `${emoji} ${time} ${user} — ${e.detail || e.type}`; });
       return interaction.reply({ embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('📋 Recent Server Events').setDescription(lines.join('\n')).setFooter({ text: `Last ${recent.length} events • JARVIS Logs` }).setTimestamp()], flags: 64 });
@@ -2260,6 +2515,72 @@ if (interaction.commandName === 'ban') {
 
     await interaction.channel.send({ embeds: [embed], components: [row] });
     return interaction.reply({ content: `✅ **${panel.title || panel.id}** panel posted!`, flags: 64 });
+  }
+
+  // ── /listapplications ──────────────────────────────────────────
+  if (interaction.commandName === 'listapplications') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    const panelList = getApplicationPanelList(interaction.guild.id);
+    if (panelList.length === 0) return interaction.reply({ content: '❌ No application panels configured. Use the dashboard to create one first.', flags: 64 });
+    const lines = panelList.map(p => {
+      const dest = p.submitChannelId ? `<#${p.submitChannelId}>` : '⚠️ not set';
+      return `• **${p.name || p.title || p.id}** — ID: \`${p.id}\`\n  Submits to: ${dest}\n  Post with: \`/setupapplication panel:${p.id}\``;
+    }).join('\n\n');
+    return interaction.reply({
+      embeds: [new EmbedBuilder()
+        .setColor(0x5865f2)
+        .setTitle('📋 Application Panels')
+        .setDescription(lines)
+        .setFooter({ text: `${panelList.length} panel(s) configured • JARVIS Applications` })
+        .setTimestamp()
+      ],
+      flags: 64
+    });
+  }
+
+  // ── /setupapplication ───────────────────────────────────────────
+  if (interaction.commandName === 'setupapplication') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
+
+    const panelId = interaction.options.getString('panel');
+
+    if (!panelId) {
+      const panelList = getApplicationPanelList(interaction.guild.id);
+      if (panelList.length === 0) {
+        return interaction.reply({ content: '❌ No application panels configured yet. Create one in the dashboard first.', flags: 64 });
+      }
+      const lines = panelList.map(p => `• **${p.name || p.title || p.id}** — \`/setupapplication panel:${p.id}\``).join('\n');
+      return interaction.reply({
+        content: `📋 **Available application panels:**\n${lines}\n\nRun one of the commands above to post that panel here.`,
+        flags: 64
+      });
+    }
+
+    const panel = getApplicationPanel(interaction.guild.id, panelId);
+
+    if (!panel.submitChannelId) {
+      return interaction.reply({ content: `⚠️ This panel has no submission channel set yet. Configure it in the dashboard before posting it.`, flags: 64 });
+    }
+
+    const color = parseInt((panel.color || '#5865f2').replace(/^#/, ''), 16) || 0x5865f2;
+
+    const embed = new EmbedBuilder()
+      .setColor(color)
+      .setTitle(panel.title || '📋 Apply Now')
+      .setDescription(panel.description || 'Click the button below to fill out an application.')
+      .setFooter({ text: `${interaction.guild.name} • ${panel.name || panel.id} Applications` })
+      .setTimestamp();
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`app_create__${panel.id}`)
+        .setLabel(panel.buttonLabel || '📋 Apply')
+        .setStyle(ButtonStyle.Primary)
+    );
+
+    await interaction.channel.send({ embeds: [embed], components: [row] });
+    return interaction.reply({ content: `✅ **${panel.name || panel.title || panel.id}** application panel posted!`, flags: 64 });
   }
 
   // ── /setbroadcastchannel ───────────────────────────────────────
