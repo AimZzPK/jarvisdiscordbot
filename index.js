@@ -857,6 +857,42 @@ async function createTicketChannel(guild, user, reason, panelId = 'support', ans
 }
 
 // =========================
+// JARVIS AI TIERS
+// =========================
+const JARVIS_TIERS = {
+  dumb: {
+    label: 'Dumb JARVIS',
+    emoji: '🤖',
+    model: 'llama-3.1-8b-instant',
+    maxTokens: 300,
+    historyLimit: 20,
+  },
+  smart: {
+    label: 'Smart JARVIS',
+    emoji: '🧠',
+    model: 'llama-3.3-70b-versatile', // swap here if Groq deprecates it
+    maxTokens: 800,
+    historyLimit: 40,
+  },
+};
+
+function isGuildPremium(guildId) {
+  return !!dashboardConfig.premiumGuilds?.[guildId];
+}
+
+// Per-guild *choice* of brain — separate from whether they're allowed to pick "smart"
+function getJarvisTierKey(guildId) {
+  const wanted = dashboardConfig.jarvisTier?.[guildId] || 'dumb';
+  // Enforce: only premium guilds can actually run smart, even if it's stored as their pick
+  if (wanted === 'smart' && !isGuildPremium(guildId)) return 'dumb';
+  return wanted;
+}
+
+function getJarvisTier(guildId) {
+  return JARVIS_TIERS[getJarvisTierKey(guildId)];
+}
+
+// =========================
 // ── APPLICATION HELPERS ──
 // =========================
 
@@ -2139,18 +2175,49 @@ if (interaction.commandName === 'ban') {
   }
 
   // ── /ask ───────────────────────────────────────────────────────
-  if (interaction.commandName === 'ask') {
-    await interaction.deferReply();
-    const question = interaction.options.getString('question');
-    if (question.toLowerCase().includes('@everyone') || question.toLowerCase().includes('@here')) return interaction.editReply("nah not doing that 💀");
-    try {
-      const res = await groq.chat.completions.create({ model: "llama-3.1-8b-instant", messages: [{ role: "system", content: "You are JARVIS, a smart and chill Discord bot. Answer questions clearly and naturally. Be concise unless the question needs detail. Talk like a real person, not a textbook. Never write @everyone or @here in your reply." }, { role: "user", content: question }], temperature: 0.8, max_tokens: 600 });
-      let answer = res.choices[0].message.content.replace(/@everyone/gi, '`@everyone`').replace(/@here/gi, '`@here`');
-      const chunks = splitMessage(answer);
-      await interaction.editReply(chunks[0]);
-      for (let i = 1; i < chunks.length; i++) await interaction.followUp(chunks[i]);
-    } catch (err) { console.error(err); return interaction.editReply("brain broke rq, try again 💀"); }
+if (interaction.commandName === 'ask') {
+  await interaction.deferReply();
+
+  const question = interaction.options.getString('question');
+  const jarvisTier = getJarvisTier(interaction.guild?.id);
+
+  if (
+    question.toLowerCase().includes('@everyone') ||
+    question.toLowerCase().includes('@here')
+  ) {
+    return interaction.editReply("nah not doing that 💀");
   }
+
+  try {
+    const res = await groq.chat.completions.create({
+      model: jarvisTier.model,
+      messages: [
+        {
+          role: "system",
+          content: "You are JARVIS, a smart and chill Discord bot."
+        },
+        {
+          role: "user",
+          content: question
+        }
+      ],
+      temperature: 0.8,
+      max_tokens: jarvisTier.maxTokens
+    });
+
+    const answer = res.choices[0].message.content;
+
+    return interaction.editReply(answer);
+
+  } catch (err) {
+    console.error('[ASK] failed:', err);
+
+    return interaction.editReply(
+      "❌ My AI brain crashed for a second, try again."
+    );
+  }
+}
+
 
   // ── /roast ─────────────────────────────────────────────────────
   if (interaction.commandName === 'roast') {
