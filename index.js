@@ -1407,7 +1407,27 @@ client.once('clientReady', async () => {
   };
 
   await initVoiceAssistant(client, () => dashboardConfig, voiceDeps);
+
+  // ⭐ Enforce Voice Assistant premium gating on a recurring basis.
+  // Disconnects any guild whose voiceChannels entry exists but is no
+  // longer premium (covers: pre-existing free setups, and refunds/
+  // expirations that happen while a connection is already active).
+  setInterval(() => enforceVoicePremium(client, voiceDeps), 15_000);
+  // Run once immediately on boot too, so stale free setups don't survive a restart.
+  enforceVoicePremium(client, voiceDeps);
 });
+
+function enforceVoicePremium(client, voiceDeps) {
+  const voiceChannels = dashboardConfig.voiceChannels || {};
+  for (const guildId of Object.keys(voiceChannels)) {
+    if (!isGuildPremium(guildId)) {
+      console.log(`[Voice] Guild ${guildId} lost/lacks premium — disconnecting voice assistant.`);
+      try { leaveVoice(guildId); } catch (err) { console.error('[Voice] enforceVoicePremium leaveVoice failed:', err.message); }
+      delete dashboardConfig.voiceChannels[guildId];
+      saveDashboardConfig(dashboardConfig).catch(() => {});
+    }
+  }
+}
 
 // =========================
 // GUILD JOIN — Welcome DM to server owner
@@ -2035,6 +2055,15 @@ if (interaction.commandName === 'giveaway') {
   if (interaction.commandName === 'setvoicechannel') {
      if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
       if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need Manage Server permission.', flags: 64 });
+
+      // ⭐ PREMIUM GATE — Voice Assistant is a paid feature
+      if (!isGuildPremium(interaction.guild.id)) {
+        return interaction.reply({
+          content: '⭐ The **Voice Assistant** is a Premium feature. Upgrade once on the dashboard (https://jarvisbot-rust.vercel.app/dashboard.html) to let JARVIS join and listen in voice channels 24/7.',
+          flags: 64
+        });
+      }
+
       const channel = interaction.options.getChannel('channel');
       dashboardConfig.voiceChannels = dashboardConfig.voiceChannels || {};
       dashboardConfig.voiceChannels[interaction.guild.id] = channel.id;
