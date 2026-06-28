@@ -1687,7 +1687,84 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ content: "✅ Feedback sent! Thanks ❤️", flags: 64 });
     } catch { return interaction.reply({ content: "❌ Could not send feedback", flags: 64 }); }
   }
+  // ── /vote ──────────────────────────────────────────────────────
+  if (interaction.commandName === 'vote') {
+    await interaction.deferReply({ flags: 64 });
+    const guildId = interaction.guild?.id;
 
+    let hasVoted = false;
+    if (TOPGG_TOKEN && BOT_ID) {
+      try {
+        const voteRes = await axios.get(
+          `https://top.gg/api/bots/${BOT_ID}/check?userId=${interaction.user.id}`,
+          { headers: { Authorization: TOPGG_TOKEN } }
+        );
+        hasVoted = voteRes.data?.voted === 1;
+      } catch (err) {
+        console.error('[Vote] top.gg check failed:', err.message);
+      }
+    }
+
+    const daysLeft = guildId ? await getVotePremiumDaysLeft(guildId) : 0;
+
+    if (!hasVoted) {
+      return interaction.editReply({
+        embeds: [new EmbedBuilder()
+          .setColor(0x5865f2)
+          .setTitle('⭐ Vote for JARVIS on top.gg!')
+          .setDescription(
+            `You haven't voted yet (votes reset every 12 hours).\n\n` +
+            `**[Click here to vote → top.gg/bot/${BOT_ID}/vote](https://top.gg/bot/${BOT_ID}/vote)**\n\n` +
+            `Every vote gives this server **30 days of free Premium**!\n` +
+            `Votes stack — vote daily to keep Premium going forever.\n\n` +
+            (daysLeft > 0 ? `⏳ This server has **${daysLeft} day(s)** of vote-premium remaining.` : `⚡ This server has no active vote-premium yet. Vote to unlock it!`)
+          )
+          .setFooter({ text: 'JARVIS • Vote every 12h | top.gg' })
+        ],
+      });
+    }
+
+    if (guildId) {
+      try {
+        const key = `vote-premium-${guildId}`;
+        const stored = await redis.get(key);
+        const currentExpiry = stored ? parseInt(stored) : Date.now();
+        const newExpiry = Math.max(currentExpiry, Date.now()) + THIRTY_DAYS_MS;
+        await redis.set(key, newExpiry.toString());
+        const newDaysLeft = Math.ceil((newExpiry - Date.now()) / (24 * 60 * 60 * 1000));
+
+        await pushLogEvent(guildId, {
+          type: 'votePremium', userId: interaction.user.id, username: interaction.user.tag,
+          detail: `Voted on top.gg — Premium extended to ${newDaysLeft} days`
+        });
+
+        return interaction.editReply({
+          embeds: [new EmbedBuilder()
+            .setColor(0x22c55e)
+            .setTitle('🎉 Thank you for voting!')
+            .setDescription(
+              `<@${interaction.user.id}> voted for JARVIS on top.gg!\n\n` +
+              `⭐ This server now has **${newDaysLeft} day(s)** of free Premium!\n\n` +
+              `**Premium unlocks:**\n` +
+              `• Unlimited ticket panels (up to 5 questions each)\n` +
+              `• Unlimited application panels\n` +
+              `• Advanced JARVIS brain (smarter AI)\n` +
+              `• Voice assistant (24/7 voice channel)\n\n` +
+              `**Vote again in 12 hours to keep stacking!**\n` +
+              `[Vote again → top.gg/bot/${BOT_ID}/vote](https://top.gg/bot/${BOT_ID}/vote)`
+            )
+            .setFooter({ text: 'JARVIS • Vote every 12h to keep Premium going' })
+            .setTimestamp()
+          ],
+        });
+      } catch (err) {
+        console.error('[Vote] Redis error:', err.message);
+        return interaction.editReply({ content: '❌ Something went wrong granting premium. Try again in a moment.' });
+      }
+    } else {
+      return interaction.editReply({ content: `✅ Thanks for voting! Run \`/vote\` inside a server to apply the Premium reward there.` });
+    }
+  }
 
   // ── /setvoicechannel ───────────────────────────────────────────
   if (interaction.commandName === 'setvoicechannel') {
