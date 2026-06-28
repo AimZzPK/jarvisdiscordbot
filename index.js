@@ -755,11 +755,14 @@ function getPanel(guildId, panelId) {
   return {
     id: panelId || 'support',
     title: '🎫 Support Tickets',
+    embedTitle: '🎫 Support Tickets',
+    embedDesc: 'Need help? Click a button below to open a ticket.',
     description: 'Need help? Click the button below to open a support ticket.',
     buttonLabel: '🎫 Create Ticket',
     color: '#5865f2',
     supportRoleId: null,
     questions: [],
+    buttons: [],
   };
 }
 
@@ -769,7 +772,7 @@ function getPanelList(guildId) {
   return [{ id: 'support', title: '🎫 Support Tickets', buttonLabel: '🎫 Create Ticket' }];
 }
 
-async function createTicketChannel(guild, user, reason, panelId = 'support', answers = []) {
+async function createTicketChannel(guild, user, reason, panelId = 'support', answers = [], overrideRoleId = null) {
   const existingKey = `ticket-${guild.id}-${user.id}`;
   const existingChannelId = memory[existingKey];
   if (existingChannelId) {
@@ -779,6 +782,7 @@ async function createTicketChannel(guild, user, reason, panelId = 'support', ans
   }
 
   const panel = getPanel(guild.id, panelId);
+const supportRoleId = overrideRoleId !== null ? overrideRoleId : (panel.supportRoleId || null);
   const categoryId = memory.ticketCategories?.[guild.id] || null;
   const countKey = `ticket-count-${guild.id}`;
   const currentCount = parseInt(await redis.get(countKey) || '0') + 1;
@@ -1302,36 +1306,53 @@ client.on('interactionCreate', async (interaction) => {
 
   // ── Panel create ticket button — customId: panel_create_ticket__<panelId> ──
   if (interaction.isButton() && interaction.customId.startsWith('panel_create_ticket')) {
-    if (!interaction.guild) return;
-    const parts = interaction.customId.split('__');
-    const panelId = parts[1] || 'support';
-    const panel = getPanel(interaction.guild.id, panelId);
-    const questions = panel.questions || [];
+  if (!interaction.guild) return;
+  const parts = interaction.customId.split('__');
+  const panelId = parts[1] || 'support';
+  const buttonId = parts[2] || null;
+  const panel = getPanel(interaction.guild.id, panelId);
 
-    if (questions.length === 0) {
-      try {
-        const result = await createTicketChannel(interaction.guild, interaction.user, null, panelId, []);
-        if (result.error) return interaction.reply({ content: result.error, flags: 64 });
-        return interaction.reply({ content: `✅ Your ticket has been opened: <#${result.channelId}>`, flags: 64 });
-      } catch (err) {
-        console.error('[Panel Ticket] create failed:', err);
-        return interaction.reply({ content: '❌ Failed to create ticket. Make sure I have **Manage Channels** permission.', flags: 64 });
-      }
-    }
-
-    const modal = new ModalBuilder()
-      .setCustomId(`ticket_modal__${panelId}`)
-      .setTitle((panel.title || 'Open a Ticket').slice(0, 45));
-
-    questions.slice(0, 5).forEach((q, i) => {
-      const input = new TextInputBuilder()
-        .setCustomId(`q_${i}`).setLabel(q.slice(0, 45))
-        .setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(500);
-      modal.addComponents(new ActionRowBuilder().addComponents(input));
-    });
-
-    return interaction.showModal(modal);
+  let btnConfig = null;
+  if (buttonId && Array.isArray(panel.buttons)) {
+    btnConfig = panel.buttons.find(b => b.id === buttonId);
   }
+  if (!btnConfig) {
+    btnConfig = {
+      id: panelId,
+      label: panel.buttonLabel || '🎫 Create Ticket',
+      supportRoleId: panel.supportRoleId,
+      questions: panel.questions || [],
+    };
+  }
+
+  const questions = btnConfig.questions || [];
+
+  if (questions.length === 0) {
+    try {
+      const result = await createTicketChannel(
+        interaction.guild, interaction.user, null, panelId, [], btnConfig.supportRoleId || null
+      );
+      if (result.error) return interaction.reply({ content: result.error, flags: 64 });
+      return interaction.reply({ content: `✅ Your ticket has been opened: <#${result.channelId}>`, flags: 64 });
+    } catch (err) {
+      console.error('[Panel Ticket] create failed:', err);
+      return interaction.reply({ content: '❌ Failed to create ticket. Make sure I have **Manage Channels** permission.', flags: 64 });
+    }
+  }
+
+  const modal = new ModalBuilder()
+    .setCustomId(`ticket_modal__${panelId}__${btnConfig.id}`)
+    .setTitle((btnConfig.label || panel.embedTitle || panel.title || 'Open a Ticket').slice(0, 45));
+
+  questions.slice(0, 5).forEach((q, i) => {
+    const input = new TextInputBuilder()
+      .setCustomId(`q_${i}`).setLabel(q.slice(0, 45))
+      .setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(500);
+    modal.addComponents(new ActionRowBuilder().addComponents(input));
+  });
+
+  return interaction.showModal(modal);
+}
 
   // ── Application panel apply button — customId: app_create__<panelId> ──
   if (interaction.isButton() && interaction.customId.startsWith('app_create__')) {
@@ -2250,58 +2271,47 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   // ── /setuppanel ────────────────────────────────────────────────
-  if (interaction.commandName === 'setuppanel') {
-    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
-    if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
+    if (interaction.commandName === 'setuppanel') {
+  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+  if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
 
-    const panelIdArg = interaction.options.getString('panel');
-    const panelList = getPanelList(interaction.guild.id);
+  const panelIdArg = interaction.options.getString('panel');
+  const panelList = getPanelList(interaction.guild.id);
+  if (panelList.length === 0) return interaction.reply({ content: '❌ No panels configured. Create them in the dashboard first.', flags: 64 });
 
-    if (panelList.length === 0) return interaction.reply({ content: '❌ No panels configured. Create them in the dashboard first.', flags: 64 });
+  const panelsToPost = panelIdArg
+    ? [getPanel(interaction.guild.id, panelIdArg)]
+    : panelList.slice(0, 5);
 
-    // Specific panel requested — post just that one
-    if (panelIdArg) {
-      const panel = getPanel(interaction.guild.id, panelIdArg);
-      const color = parseInt((panel.color || '#5865f2').replace(/^#/, ''), 16) || 0x5865f2;
-      const embed = new EmbedBuilder()
-        .setColor(color)
-        .setTitle(panel.title || '🎫 Support Tickets')
-        .setDescription(panel.description || 'Click the button below to open a support ticket.')
-        .setFooter({ text: `${interaction.guild.name} • ${panel.id} Support` })
-        .setTimestamp();
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`panel_create_ticket__${panel.id}`).setLabel(panel.buttonLabel || '🎫 Create Ticket').setStyle(ButtonStyle.Primary)
-      );
-      await interaction.channel.send({ embeds: [embed], components: [row] });
-      return interaction.reply({ content: `✅ **${panel.title || panel.id}** panel posted!`, flags: 64 });
-    }
-
-    // No specific panel — post ONE embed with ALL panels as multi-buttons (max 5 per row)
-    const visiblePanels = panelList.slice(0, 5);
-    const descLines = visiblePanels.map(p => `**${p.buttonLabel || p.title || p.id}** — ${p.description || 'Open a ticket'}`);
-
+  for (const panel of panelsToPost) {
+    const color = parseInt((panel.color || '#5865f2').replace(/^#/, ''), 16) || 0x5865f2;
     const embed = new EmbedBuilder()
-      .setColor(0x5865f2)
-      .setTitle('🎫 Support Tickets')
-      .setDescription(descLines.join('\n\n'))
+      .setColor(color)
+      .setTitle(panel.embedTitle || panel.title || '🎫 Support Tickets')
+      .setDescription(panel.embedDesc || panel.description || 'Click a button below to open a ticket.')
       .setFooter({ text: `${interaction.guild.name} • Ticket System` })
       .setTimestamp();
 
+    const buttons = Array.isArray(panel.buttons) && panel.buttons.length > 0
+      ? panel.buttons
+      : [{ id: panel.id, label: panel.buttonLabel || '🎫 Create Ticket', supportRoleId: panel.supportRoleId, questions: panel.questions || [] }];
+
     const row = new ActionRowBuilder().addComponents(
-      visiblePanels.map(p =>
+      buttons.slice(0, 5).map(b =>
         new ButtonBuilder()
-          .setCustomId(`panel_create_ticket__${p.id}`)
-          .setLabel(p.buttonLabel || p.title || p.id)
+          .setCustomId(`panel_create_ticket__${panel.id}__${b.id}`)
+          .setLabel(b.label || '🎫 Ticket')
           .setStyle(ButtonStyle.Primary)
       )
     );
 
     await interaction.channel.send({ embeds: [embed], components: [row] });
-    return interaction.reply({
-      content: `✅ Posted combined panel embed with **${visiblePanels.length}** button(s).${panelList.length > 5 ? '\n⚠️ Only the first 5 panels shown (Discord limit). Use `/setuppanel panel:<id>` to post the rest individually.' : ''}`,
-      flags: 64,
-    });
   }
+
+  const posted = panelsToPost[0];
+  const btnCount = Array.isArray(posted?.buttons) && posted.buttons.length > 0 ? posted.buttons.length : 1;
+  return interaction.reply({ content: `✅ Panel posted with **${btnCount}** button(s)!`, flags: 64 });
+}
 
   // ── /listapplications ──────────────────────────────────────────
   if (interaction.commandName === 'listapplications') {
