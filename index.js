@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const activeGiveaways = new Map(); // messageId -> timeout
+const activeGiveaways = new Map();
 const { initSocialNotifications } = require('./socialNotifications');
 const { joinAndListen, leaveVoice, initVoiceAssistant } = require('./voiceAssistant');
 const axios = require('axios');
@@ -19,8 +19,8 @@ const {
   AuditLogEvent,
   ActivityType,
   ModalBuilder,
-  TextInputBuilder,    
-  TextInputStyle,  
+  TextInputBuilder,
+  TextInputStyle,
 } = require('discord.js');
 
 const OpenAI = require('openai');
@@ -64,6 +64,9 @@ function isOwner(userId) {
 // =========================
 const OWNER_ID = "1314595863666098176";
 const OWNER_NAME = "W.Idoe known as AimZz";
+const BOT_ID = process.env.CLIENT_ID;
+const TOPGG_TOKEN = process.env.TOPGG_TOKEN;
+const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
 // =========================
 // MEMORY (Redis)
@@ -87,8 +90,7 @@ async function loadMemory() {
 }
 
 // =========================
-// DASHBOARD CONFIG (separate store — owned by dashboard + bot slash
-// commands directly, no shared-blob merge with jarvis-memory)
+// DASHBOARD CONFIG
 // =========================
 const DASHBOARD_CONFIG_KEY = 'jarvis-dashboard-config';
 const LEGACY_DASHBOARD_KEYS = ['logChannels', 'modes', 'automod', 'enabledLogEvents', 'ticketPanels'];
@@ -123,8 +125,6 @@ async function loadDashboardConfig() {
   } catch (err) {
     console.error('[Dashboard] load failed:', err.message);
   }
-
-  // One-time migration: pull legacy dashboard keys out of the old shared blob
   const migrated = {};
   let hasLegacyData = false;
   for (const key of LEGACY_DASHBOARD_KEYS) {
@@ -136,7 +136,33 @@ async function loadDashboardConfig() {
   dashboardConfig = migrated;
   if (hasLegacyData) {
     await saveDashboardConfig(dashboardConfig);
-    console.log('✅ Migrated legacy dashboard config to jarvis-dashboard-config');
+    console.log('✅ Migrated legacy dashboard config');
+  }
+}
+
+// =========================
+// PREMIUM
+// =========================
+async function isGuildPremium(guildId) {
+  if (dashboardConfig.premiumGuilds?.[guildId]) return true;
+  try {
+    const key = `vote-premium-${guildId}`;
+    const expiry = await redis.get(key);
+    if (expiry && Date.now() < parseInt(expiry)) return true;
+  } catch {}
+  return false;
+}
+
+async function getVotePremiumDaysLeft(guildId) {
+  try {
+    const key = `vote-premium-${guildId}`;
+    const expiry = await redis.get(key);
+    if (!expiry) return 0;
+    const ms = parseInt(expiry) - Date.now();
+    if (ms <= 0) return 0;
+    return Math.ceil(ms / (24 * 60 * 60 * 1000));
+  } catch {
+    return 0;
   }
 }
 
@@ -200,20 +226,38 @@ const MODES = {
   }
 };
 
-function getModeDescription(mode) {
-  const descs = {
-    normal: "back to the default vibe",
-    roast: "everyone's getting cooked 🍳",
-    hype: "everything is INCREDIBLE from now on",
-    tutor: "patient teacher mode activated",
-    chill: "lowkey and unbothered",
-    evil: "mwahahaha 😈"
-  };
-  return descs[mode] || "";
-}
-
 function getActiveMode(guildId) {
   return dashboardConfig.modes?.[guildId] || 'normal';
+}
+
+// =========================
+// JARVIS AI TIERS
+// =========================
+const JARVIS_TIERS = {
+  dumb: {
+    label: 'Unadvanced JARVIS',
+    emoji: '🤖',
+    model: 'llama-3.1-8b-instant',
+    maxTokens: 300,
+    historyLimit: 20,
+  },
+  smart: {
+    label: 'Advanced JARVIS',
+    emoji: '🧠',
+    model: 'llama-3.3-70b-versatile',
+    maxTokens: 800,
+    historyLimit: 40,
+  },
+};
+
+async function getJarvisTierKey(guildId) {
+  const wanted = dashboardConfig.jarvisTier?.[guildId] || 'dumb';
+  if (wanted === 'smart' && !(await isGuildPremium(guildId))) return 'dumb';
+  return wanted;
+}
+
+async function getJarvisTier(guildId) {
+  return JARVIS_TIERS[await getJarvisTierKey(guildId)];
 }
 
 // =========================
@@ -259,47 +303,33 @@ async function pushLogEvent(guildId, event) {
 }
 
 const LOG_COLORS = {
-  join:          0x57f287,
-  leave:         0xed4245,
-  ban:           0xe74c3c,
-  unban:         0x2ecc71,
-  kick:          0xe67e22,
-  timeout:       0xf1c40f,
-  messageDelete: 0xff6b6b,
-  messageEdit:   0x3498db,
-  channelCreate: 0x1abc9c,
-  channelDelete: 0xe74c3c,
-  roleCreate:    0x9b59b6,
-  roleDelete:    0x8e44ad,
-  roleUpdate:    0xa855f7,
-  voiceJoin:     0x57f287,
-  voiceLeave:    0xed4245,
-  voiceMove:     0x3b82f6,
-  warn:          0xfbbf24,
-  nickChange:    0x60a5fa,
-  automod:       0xff4d4d,
+  join: 0x57f287, leave: 0xed4245, ban: 0xe74c3c, unban: 0x2ecc71,
+  kick: 0xe67e22, timeout: 0xf1c40f, messageDelete: 0xff6b6b, messageEdit: 0x3498db,
+  channelCreate: 0x1abc9c, channelDelete: 0xe74c3c, roleCreate: 0x9b59b6,
+  roleDelete: 0x8e44ad, roleUpdate: 0xa855f7, voiceJoin: 0x57f287,
+  voiceLeave: 0xed4245, voiceMove: 0x3b82f6, warn: 0xfbbf24,
+  nickChange: 0x60a5fa, automod: 0xff4d4d,
 };
 
 // =========================
-// LOG EVENTS  (unchanged from original)
+// LOG EVENTS
 // =========================
 client.on('guildMemberAdd', async (member) => {
   const event = { type: 'join', userId: member.id, username: member.user.tag, detail: `Account created: <t:${Math.floor(member.user.createdTimestamp / 1000)}:R>` };
   await pushLogEvent(member.guild.id, event);
-  if (!isLogEventEnabled(member.guild.id, 'join')) return;
-  const embed = new EmbedBuilder()
-    .setColor(LOG_COLORS.join).setTitle('📥 Member Joined')
-    .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
-    .addFields(
-      { name: 'User', value: `<@${member.id}> (${member.user.tag})`, inline: true },
-      { name: 'ID', value: member.id, inline: true },
-      { name: 'Account Age', value: `<t:${Math.floor(member.user.createdTimestamp / 1000)}:R>`, inline: true },
-      { name: 'Member Count', value: `${member.guild.memberCount}`, inline: true }
-    )
-    .setFooter({ text: `JARVIS Logs • ${member.guild.name}` }).setTimestamp();
-  await sendLog(member.guild.id, embed);
-
-// ── Welcome message ───────────────────────────────────────────
+  if (isLogEventEnabled(member.guild.id, 'join')) {
+    const embed = new EmbedBuilder()
+      .setColor(LOG_COLORS.join).setTitle('📥 Member Joined')
+      .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
+      .addFields(
+        { name: 'User', value: `<@${member.id}> (${member.user.tag})`, inline: true },
+        { name: 'ID', value: member.id, inline: true },
+        { name: 'Account Age', value: `<t:${Math.floor(member.user.createdTimestamp / 1000)}:R>`, inline: true },
+        { name: 'Member Count', value: `${member.guild.memberCount}`, inline: true }
+      )
+      .setFooter({ text: `JARVIS Logs • ${member.guild.name}` }).setTimestamp();
+    await sendLog(member.guild.id, embed);
+  }
   const welcomeCfg = dashboardConfig.welcome?.[member.guild.id];
   if (welcomeCfg?.enabled && welcomeCfg?.channelId) {
     try {
@@ -309,15 +339,13 @@ client.on('guildMemberAdd', async (member) => {
         : `👋 Welcome <@${member.id}> to **${member.guild.name}**! We're glad to have you here.`;
       const color = /^#[0-9a-fA-F]{6}$/.test(welcomeCfg.embedColor) ? parseInt(welcomeCfg.embedColor.slice(1), 16) : 0x57f287;
       const welcomeEmbed = new EmbedBuilder()
-        .setColor(color)
-        .setDescription(msg)
-        .setThumbnail(member.user.displayAvatarURL({ dynamic: true })) // avatar stays small, top-right
-        .setFooter({ text: member.guild.name })
-        .setTimestamp();
-      if (welcomeCfg.imageUrl) welcomeEmbed.setImage(welcomeCfg.imageUrl); // big banner below the text
+        .setColor(color).setDescription(msg)
+        .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
+        .setFooter({ text: member.guild.name }).setTimestamp();
+      if (welcomeCfg.imageUrl) welcomeEmbed.setImage(welcomeCfg.imageUrl);
       await welcomeChannel.send({ embeds: [welcomeEmbed] });
     } catch (err) {
-      console.error('[Welcome] Failed to send welcome message:', err.message);
+      console.error('[Welcome] Failed:', err.message);
     }
   }
 });
@@ -338,8 +366,6 @@ client.on('guildMemberRemove', async (member) => {
       .setFooter({ text: `JARVIS Logs • ${member.guild.name}` }).setTimestamp();
     await sendLog(member.guild.id, embed);
   }
-
-  // ── Leave message ─────────────────────────────────────────────
   const leaveCfg = dashboardConfig.leave?.[member.guild.id];
   if (leaveCfg?.enabled && leaveCfg?.channelId) {
     try {
@@ -349,15 +375,13 @@ client.on('guildMemberRemove', async (member) => {
         : `👋 **${member.user.tag}** has left **${member.guild.name}**. We'll miss you!`;
       const color = /^#[0-9a-fA-F]{6}$/.test(leaveCfg.embedColor) ? parseInt(leaveCfg.embedColor.slice(1), 16) : 0xed4245;
       const leaveEmbed = new EmbedBuilder()
-        .setColor(color)
-        .setDescription(msg)
-        .setThumbnail(member.user.displayAvatarURL({ dynamic: true })) // avatar stays small, top-right
-        .setFooter({ text: member.guild.name })
-        .setTimestamp();
-      if (leaveCfg.imageUrl) leaveEmbed.setImage(leaveCfg.imageUrl); // big banner below the text
+        .setColor(color).setDescription(msg)
+        .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
+        .setFooter({ text: member.guild.name }).setTimestamp();
+      if (leaveCfg.imageUrl) leaveEmbed.setImage(leaveCfg.imageUrl);
       await leaveChannel.send({ embeds: [leaveEmbed] });
     } catch (err) {
-      console.error('[Leave] Failed to send leave message:', err.message);
+      console.error('[Leave] Failed:', err.message);
     }
   }
 });
@@ -390,7 +414,7 @@ client.on('messageUpdate', async (oldMsg, newMsg) => {
       { name: 'Author', value: `<@${newMsg.author.id}> (${newMsg.author.tag})`, inline: true },
       { name: 'Channel', value: `<#${newMsg.channel.id}>`, inline: true },
       { name: 'Before', value: oldMsg.content?.slice(0, 512) || '*[unavailable]*' },
-      { name: 'After',  value: newMsg.content?.slice(0, 512) || '*[empty]*' }
+      { name: 'After', value: newMsg.content?.slice(0, 512) || '*[empty]*' }
     )
     .setFooter({ text: `JARVIS Logs • ${newMsg.guild.name}` }).setTimestamp();
   await sendLog(newMsg.guild.id, embed);
@@ -539,7 +563,7 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
     .addFields(
       { name: 'User', value: `<@${newMember.id}> (${newMember.user.tag})`, inline: true },
       { name: 'Before', value: oldMember.nickname || '*none*', inline: true },
-      { name: 'After',  value: newMember.nickname || '*none*', inline: true }
+      { name: 'After', value: newMember.nickname || '*none*', inline: true }
     )
     .setFooter({ text: `JARVIS Logs • ${newMember.guild.name}` }).setTimestamp();
   await sendLog(newMember.guild.id, embed);
@@ -571,10 +595,10 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 });
 
 // =========================
-// AUTO MODERATION  (unchanged)
+// AUTO MODERATION
 // =========================
 const SLUR_LIST = [
-  'nigger','nigga','faggot','fag','retard','chink','spic','kike','wetback','gook','tranny','dyke','fuck','bitch'
+  'nigger', 'nigga', 'faggot', 'fag', 'retard', 'chink', 'spic', 'kike', 'wetback', 'gook', 'tranny', 'dyke', 'fuck', 'bitch'
 ];
 const spamTracker = new Map();
 
@@ -628,10 +652,10 @@ async function handleAutomod(message) {
   const logEmbed = new EmbedBuilder()
     .setColor(LOG_COLORS.automod).setTitle('🛡️ AutoMod Triggered')
     .addFields(
-      { name: 'User',    value: `<@${message.author.id}> (${message.author.tag})`, inline: true },
+      { name: 'User', value: `<@${message.author.id}> (${message.author.tag})`, inline: true },
       { name: 'Channel', value: `<#${message.channel.id}>`, inline: true },
-      { name: 'Filter',  value: filterName, inline: true },
-      { name: 'Action',  value: action, inline: true },
+      { name: 'Filter', value: filterName, inline: true },
+      { name: 'Action', value: action, inline: true },
       { name: 'Message', value: content.slice(0, 512) || '*[empty]*' }
     )
     .setFooter({ text: `JARVIS AutoMod • ${message.guild.name}` }).setTimestamp();
@@ -676,57 +700,40 @@ async function endGiveaway(channel, messageId, forced = false) {
   try {
     const msg = await channel.messages.fetch(messageId);
     if (!msg) return;
-
     const key = `giveaway-${messageId}`;
     const data = await redis.get(key);
     if (!data) return;
-
     const giveaway = typeof data === 'string' ? JSON.parse(data) : data;
     if (giveaway.ended && !forced) return;
-
     giveaway.ended = true;
     await redis.set(key, JSON.stringify(giveaway));
-
     const entries = giveaway.entries || [];
     const winnerCount = giveaway.winnerCount || 1;
-
     if (entries.length === 0) {
       const endEmbed = new EmbedBuilder()
-        .setColor(0xed4245)
-        .setTitle('🎉 Giveaway Ended')
+        .setColor(0xed4245).setTitle('🎉 Giveaway Ended')
         .setDescription(`**Prize:** ${giveaway.prize}\n\n❌ No one entered the giveaway.`)
-        .setFooter({ text: 'JARVIS Giveaways • No winners' })
-        .setTimestamp();
+        .setFooter({ text: 'JARVIS Giveaways • No winners' }).setTimestamp();
       await msg.edit({ embeds: [endEmbed], components: [] });
       await channel.send(`😔 No one entered the **${giveaway.prize}** giveaway.`);
       return;
     }
-
-    // Pick winners (no duplicates)
     const shuffled = [...entries].sort(() => Math.random() - 0.5);
     const winners = shuffled.slice(0, Math.min(winnerCount, entries.length));
     const winnerMentions = winners.map(id => `<@${id}>`).join(', ');
-
     const endEmbed = new EmbedBuilder()
-      .setColor(0xffd700)
-      .setTitle('🎉 Giveaway Ended!')
+      .setColor(0xffd700).setTitle('🎉 Giveaway Ended!')
       .setDescription(`**Prize:** ${giveaway.prize}\n\n🏆 **Winner(s):** ${winnerMentions}`)
       .addFields(
         { name: '👥 Entries', value: `${entries.length}`, inline: true },
         { name: '🏆 Winners', value: `${winners.length}`, inline: true },
         { name: '🎟️ Hosted by', value: `<@${giveaway.hostId}>`, inline: true }
       )
-      .setFooter({ text: 'JARVIS Giveaways • Ended' })
-      .setTimestamp();
-
+      .setFooter({ text: 'JARVIS Giveaways • Ended' }).setTimestamp();
     await msg.edit({ embeds: [endEmbed], components: [] });
     await channel.send(`🎉 Congratulations ${winnerMentions}! You won **${giveaway.prize}**!`);
-
-    // Store winners for reroll
     giveaway.winners = winners;
     await redis.set(key, JSON.stringify(giveaway));
-
-    // Clear active timer if exists
     if (activeGiveaways.has(messageId)) {
       clearTimeout(activeGiveaways.get(messageId));
       activeGiveaways.delete(messageId);
@@ -736,43 +743,32 @@ async function endGiveaway(channel, messageId, forced = false) {
   }
 }
 
-
 // =========================
-// ── TICKET HELPERS ────────
+// TICKET HELPERS
 // =========================
-
-/**
- * Get a panel's config from dashboardConfig by panelId for a given guild.
- * Falls back to a default if not found.
- */
 function getPanel(guildId, panelId) {
   const panels = dashboardConfig.ticketPanels?.[guildId];
   if (Array.isArray(panels)) {
     const found = panels.find(p => p.id === panelId);
     if (found) return found;
   }
-  // Default
   return {
     id: panelId || 'support',
     title: '🎫 Support Tickets',
-    description: 'Need help? Click the button below to open a support ticket and our team will assist you.',
+    description: 'Need help? Click the button below to open a support ticket.',
     buttonLabel: '🎫 Create Ticket',
     color: '#5865f2',
+    supportRoleId: null,
+    questions: [],
   };
 }
 
-/**
- * List all panels for a guild (for /setuppanel autocomplete).
- */
 function getPanelList(guildId) {
   const panels = dashboardConfig.ticketPanels?.[guildId];
   if (Array.isArray(panels) && panels.length > 0) return panels;
-  return [{ id: 'support', title: '🎫 Support Tickets' }];
+  return [{ id: 'support', title: '🎫 Support Tickets', buttonLabel: '🎫 Create Ticket' }];
 }
 
-/**
- * Create a ticket channel for a given user and panel.
- */
 async function createTicketChannel(guild, user, reason, panelId = 'support', answers = []) {
   const existingKey = `ticket-${guild.id}-${user.id}`;
   const existingChannelId = memory[existingKey];
@@ -788,15 +784,18 @@ async function createTicketChannel(guild, user, reason, panelId = 'support', ans
   const currentCount = parseInt(await redis.get(countKey) || '0') + 1;
   await redis.set(countKey, currentCount);
 
-  // Channel name includes panel type for easy identification
   const safePanel = panel.id.replace(/[^a-z0-9]/g, '').slice(0, 10) || 'ticket';
   const channelOptions = {
     name: `${safePanel}-${currentCount}-${user.username}`.slice(0, 100),
-    topic: `[${panel.id.toUpperCase()}] Support ticket for ${user.tag}${reason ? ` | Reason: ${reason}` : ''}`,
+    topic: `[${panel.id.toUpperCase()}] Ticket for ${user.tag}${reason ? ` | Reason: ${reason}` : ''}`,
     permissionOverwrites: [
       { id: guild.id, deny: ['ViewChannel'] },
       { id: user.id, allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory', 'AttachFiles'] },
-      { id: client.user.id, allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory', 'ManageChannels'] }
+      { id: client.user.id, allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory', 'ManageChannels'] },
+      ...(panel.supportRoleId ? [{
+        id: panel.supportRoleId,
+        allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory', 'ManageMessages', 'AttachFiles'],
+      }] : []),
     ]
   };
   if (categoryId) channelOptions.parent = categoryId;
@@ -806,10 +805,7 @@ async function createTicketChannel(guild, user, reason, panelId = 'support', ans
   await saveMemory(memory);
 
   const color = parseInt((panel.color || '#5865f2').replace(/^#/, ''), 16) || 0x5865f2;
-  const answerFields = answers.map(a => ({
-    name: `❓ ${a.question}`,
-    value: a.answer || 'No answer provided',
-  }));
+  const answerFields = answers.map(a => ({ name: `❓ ${a.question}`, value: a.answer || 'No answer provided' }));
 
   const embed = new EmbedBuilder()
     .setColor(color)
@@ -832,21 +828,19 @@ async function createTicketChannel(guild, user, reason, panelId = 'support', ans
       .setStyle(ButtonStyle.Danger)
   );
 
-  await ticketChannel.send({ content: `<@${user.id}>`, embeds: [embed], components: [closeButton] });
+  const supportPing = panel.supportRoleId ? ` <@&${panel.supportRoleId}>` : '';
+  await ticketChannel.send({ content: `<@${user.id}>${supportPing}`, embeds: [embed], components: [closeButton] });
 
   await pushLogEvent(guild.id, {
-    type: 'ticketOpen',
-    userId: user.id,
-    username: user.tag,
+    type: 'ticketOpen', userId: user.id, username: user.tag,
     detail: `Opened ${panel.id} ticket #${currentCount}${reason ? ` — ${reason}` : ' via panel'}`
   });
 
   const logEmbed = new EmbedBuilder()
-    .setColor(color)
-    .setTitle('🎫 Ticket Opened')
+    .setColor(color).setTitle('🎫 Ticket Opened')
     .addFields(
-      { name: 'User',   value: `<@${user.id}> (${user.tag})`, inline: true },
-      { name: 'Panel',  value: panel.id, inline: true },
+      { name: 'User', value: `<@${user.id}> (${user.tag})`, inline: true },
+      { name: 'Panel', value: panel.id, inline: true },
       { name: 'Ticket', value: `<#${ticketChannel.id}>`, inline: true },
       ...(reason ? [{ name: 'Reason', value: reason }] : [])
     )
@@ -857,49 +851,8 @@ async function createTicketChannel(guild, user, reason, panelId = 'support', ans
 }
 
 // =========================
-// JARVIS AI TIERS
+// APPLICATION HELPERS
 // =========================
-const JARVIS_TIERS = {
-  dumb: {
-    label: 'Dumb JARVIS',
-    emoji: '🤖',
-    model: 'llama-3.1-8b-instant',
-    maxTokens: 300,
-    historyLimit: 20,
-  },
-  smart: {
-    label: 'Smart JARVIS',
-    emoji: '🧠',
-    model: 'llama-3.3-70b-versatile', // swap here if Groq deprecates it
-    maxTokens: 800,
-    historyLimit: 40,
-  },
-};
-
-function isGuildPremium(guildId) {
-  return !!dashboardConfig.premiumGuilds?.[guildId];
-}
-
-// Per-guild *choice* of brain — separate from whether they're allowed to pick "smart"
-function getJarvisTierKey(guildId) {
-  const wanted = dashboardConfig.jarvisTier?.[guildId] || 'dumb';
-  // Enforce: only premium guilds can actually run smart, even if it's stored as their pick
-  if (wanted === 'smart' && !isGuildPremium(guildId)) return 'dumb';
-  return wanted;
-}
-
-function getJarvisTier(guildId) {
-  return JARVIS_TIERS[getJarvisTierKey(guildId)];
-}
-
-// =========================
-// ── APPLICATION HELPERS ──
-// =========================
-
-/**
- * Get an application panel's config from dashboardConfig by panelId for a given guild.
- * Falls back to a sane default if not found so callers never have to null-check.
- */
 function getApplicationPanel(guildId, panelId) {
   const panels = dashboardConfig.applicationPanels?.[guildId];
   if (Array.isArray(panels)) {
@@ -919,19 +872,12 @@ function getApplicationPanel(guildId, panelId) {
   };
 }
 
-/**
- * List all application panels for a guild.
- */
 function getApplicationPanelList(guildId) {
   const panels = dashboardConfig.applicationPanels?.[guildId];
   if (Array.isArray(panels) && panels.length > 0) return panels;
   return [];
 }
 
-/**
- * Check + record per-panel cooldown for a user. Returns null if allowed,
- * or a human-readable string describing how long until they can re-apply.
- */
 async function checkApplicationCooldown(guildId, panelId, userId, cooldownHours) {
   if (!cooldownHours || cooldownHours <= 0) return null;
   const key = `appcooldown-${guildId}-${panelId}-${userId}`;
@@ -940,8 +886,7 @@ async function checkApplicationCooldown(guildId, panelId, userId, cooldownHours)
   const lastTs = parseInt(last);
   const msLeft = (lastTs + cooldownHours * 60 * 60 * 1000) - Date.now();
   if (msLeft <= 0) return null;
-  const hoursLeft = Math.ceil(msLeft / (60 * 60 * 1000));
-  return hoursLeft;
+  return Math.ceil(msLeft / (60 * 60 * 1000));
 }
 
 async function setApplicationCooldown(guildId, panelId, userId) {
@@ -949,29 +894,15 @@ async function setApplicationCooldown(guildId, panelId, userId) {
   await redis.set(key, Date.now().toString());
 }
 
-/**
- * Submit an application: posts an embed with all Q&A to the panel's
- * configured submission channel, with Accept/Deny buttons for staff.
- */
 async function submitApplication(guild, user, panelId, answers) {
   const panel = getApplicationPanel(guild.id, panelId);
-
-  if (!panel.submitChannelId) {
-    return { error: '❌ This application is not fully configured (no submission channel set). Contact a server admin.' };
-  }
-
+  if (!panel.submitChannelId) return { error: '❌ This application has no submission channel set. Contact a server admin.' };
   let targetChannel;
-  try {
-    targetChannel = await client.channels.fetch(panel.submitChannelId);
-  } catch {
-    return { error: '❌ Could not find the submission channel. Contact a server admin.' };
-  }
+  try { targetChannel = await client.channels.fetch(panel.submitChannelId); }
+  catch { return { error: '❌ Could not find the submission channel. Contact a server admin.' }; }
 
   const color = parseInt((panel.color || '#5865f2').replace(/^#/, ''), 16) || 0x5865f2;
-  const answerFields = answers.map(a => ({
-    name: `❓ ${a.question}`,
-    value: (a.answer || 'No answer provided').slice(0, 1024),
-  }));
+  const answerFields = answers.map(a => ({ name: `❓ ${a.question}`, value: (a.answer || 'No answer provided').slice(0, 1024) }));
 
   const embed = new EmbedBuilder()
     .setColor(color)
@@ -984,30 +915,18 @@ async function submitApplication(guild, user, panelId, answers) {
       ...answerFields,
       { name: 'Status', value: '⏳ Pending review' }
     )
-    .setFooter({ text: 'JARVIS Applications' })
-    .setTimestamp();
+    .setFooter({ text: 'JARVIS Applications' }).setTimestamp();
 
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`app_accept_${panel.id}_${user.id}`).setLabel('✅ Accept').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId(`app_deny_${panel.id}_${user.id}`).setLabel('❌ Deny').setStyle(ButtonStyle.Danger)
   );
 
-  try {
-    await targetChannel.send({ embeds: [embed], components: [row] });
-  } catch (err) {
-    console.error('[Application] failed to post submission:', err.message);
-    return { error: '❌ Failed to post the application. Make sure I can send messages in the submission channel.' };
-  }
+  try { await targetChannel.send({ embeds: [embed], components: [row] }); }
+  catch (err) { console.error('[Application] failed to post submission:', err.message); return { error: '❌ Failed to post the application. Make sure I can send messages in the submission channel.' }; }
 
   await setApplicationCooldown(guild.id, panel.id, user.id);
-
-  await pushLogEvent(guild.id, {
-    type: 'applicationSubmit',
-    userId: user.id,
-    username: user.tag,
-    detail: `Submitted "${panel.name || panel.id}" application`
-  });
-
+  await pushLogEvent(guild.id, { type: 'applicationSubmit', userId: user.id, username: user.tag, detail: `Submitted "${panel.name || panel.id}" application` });
   return { ok: true, channelId: targetChannel.id };
 }
 
@@ -1115,55 +1034,27 @@ const commands = [
     .addUserOption(o => o.setName('user').setDescription('User to kick').setRequired(true))
     .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false))
     .setDMPermission(true),
-    new SlashCommandBuilder()
-  .setName('rps')
-  .setDescription('Play Rock Paper Scissors against JARVIS')
-  .addStringOption(o =>
-    o.setName('choice').setDescription('Your choice').setRequired(true)
-      .addChoices(
-        { name: '🪨 Rock', value: 'rock' },
-        { name: '📄 Paper', value: 'paper' },
-        { name: '✂️ Scissors', value: 'scissors' }
-      )
-  ).setDMPermission(true),
-
-new SlashCommandBuilder()
-  .setName('hangman')
-  .setDescription('Start a game of Hangman')
-  .setDMPermission(true),
-
-new SlashCommandBuilder()
-  .setName('guess')
-  .setDescription('Guess a letter or word in your active Hangman game')
-  .addStringOption(o => o.setName('letter').setDescription('A letter or the full word').setRequired(true))
-  .setDMPermission(true),
-
-new SlashCommandBuilder()
-  .setName('scramble')
-  .setDescription('Unscramble the word to win!')
-  .setDMPermission(true),
-
-new SlashCommandBuilder()
-  .setName('unscramble')
-  .setDescription('Submit your answer for the scrambled word')
-  .addStringOption(o => o.setName('answer').setDescription('Your answer').setRequired(true))
-  .setDMPermission(true),
-
-new SlashCommandBuilder()
-  .setName('numguess')
-  .setDescription('Start a number guessing game (1-100)')
-  .setDMPermission(true),
-
-new SlashCommandBuilder()
-  .setName('guessnumber')
-  .setDescription('Guess the number!')
-  .addIntegerOption(o => o.setName('number').setDescription('Your guess (1-100)').setRequired(true))
-  .setDMPermission(true),
-
-new SlashCommandBuilder()
-  .setName('tictactoe')
-  .setDescription('Play Tic Tac Toe against JARVIS')
-  .setDMPermission(true),
+  new SlashCommandBuilder()
+    .setName('rps').setDescription('Play Rock Paper Scissors against JARVIS')
+    .addStringOption(o => o.setName('choice').setDescription('Your choice').setRequired(true)
+      .addChoices({ name: '🪨 Rock', value: 'rock' }, { name: '📄 Paper', value: 'paper' }, { name: '✂️ Scissors', value: 'scissors' }))
+    .setDMPermission(true),
+  new SlashCommandBuilder().setName('hangman').setDescription('Start a game of Hangman').setDMPermission(true),
+  new SlashCommandBuilder()
+    .setName('guess').setDescription('Guess a letter or word in your active Hangman game')
+    .addStringOption(o => o.setName('letter').setDescription('A letter or the full word').setRequired(true))
+    .setDMPermission(true),
+  new SlashCommandBuilder().setName('scramble').setDescription('Unscramble the word to win!').setDMPermission(true),
+  new SlashCommandBuilder()
+    .setName('unscramble').setDescription('Submit your answer for the scrambled word')
+    .addStringOption(o => o.setName('answer').setDescription('Your answer').setRequired(true))
+    .setDMPermission(true),
+  new SlashCommandBuilder().setName('numguess').setDescription('Start a number guessing game (1-100)').setDMPermission(true),
+  new SlashCommandBuilder()
+    .setName('guessnumber').setDescription('Guess the number!')
+    .addIntegerOption(o => o.setName('number').setDescription('Your guess (1-100)').setRequired(true))
+    .setDMPermission(true),
+  new SlashCommandBuilder().setName('tictactoe').setDescription('Play Tic Tac Toe against JARVIS').setDMPermission(true),
   new SlashCommandBuilder()
     .setName('timeout').setDescription('Timeout a user')
     .addUserOption(o => o.setName('user').setDescription('User to timeout').setRequired(true))
@@ -1183,65 +1074,44 @@ new SlashCommandBuilder()
   new SlashCommandBuilder().setName('logs').setDescription('View recent server log events (last 10)').setDMPermission(false),
   new SlashCommandBuilder()
     .setName('automod').setDescription('Configure auto moderation for this server')
-    .addSubcommand(sub =>
-      sub.setName('enable').setDescription('Enable an automod filter')
-        .addStringOption(o =>
-          o.setName('filter').setDescription('Which filter to enable').setRequired(true)
-            .addChoices(
-              { name: 'invites — Discord invite links', value: 'invites' },
-              { name: 'spam — Spam / repeated text',    value: 'spam'    },
-              { name: 'mentions — Mass mentions (5+)',  value: 'mentions' },
-              { name: 'caps — Excessive caps (>70%)',   value: 'caps'    },
-              { name: 'links — All external links',     value: 'links'   },
-              { name: 'slurs — Hate speech / slurs',    value: 'slurs'   },
-              { name: 'all — Enable every filter',      value: 'all'     }
-            )
-        )
-    )
-    .addSubcommand(sub =>
-      sub.setName('disable').setDescription('Disable an automod filter')
-        .addStringOption(o =>
-          o.setName('filter').setDescription('Which filter to disable').setRequired(true)
-            .addChoices(
-              { name: 'invites', value: 'invites' },
-              { name: 'spam',    value: 'spam'    },
-              { name: 'mentions',value: 'mentions'},
-              { name: 'caps',    value: 'caps'    },
-              { name: 'links',   value: 'links'   },
-              { name: 'slurs',   value: 'slurs'   },
-              { name: 'all — Disable every filter', value: 'all' }
-            )
-        )
-    )
-    .addSubcommand(sub =>
-      sub.setName('action').setDescription('Set the punishment when a filter triggers')
-        .addStringOption(o =>
-          o.setName('type').setDescription('Punishment type').setRequired(true)
-            .addChoices(
-              { name: 'delete — Delete message only',        value: 'delete'  },
-              { name: 'warn — Delete + warn user',           value: 'warn'    },
-              { name: 'timeout — Delete + timeout (10 min)', value: 'timeout' },
-              { name: 'kick — Delete + kick user',           value: 'kick'    }
-            )
-        )
-    )
-    .addSubcommand(sub =>
-      sub.setName('ignorerole').setDescription('Add or remove a role that bypasses automod')
-        .addRoleOption(o => o.setName('role').setDescription('Role to toggle').setRequired(true))
-    )
+    .addSubcommand(sub => sub.setName('enable').setDescription('Enable an automod filter')
+      .addStringOption(o => o.setName('filter').setDescription('Which filter to enable').setRequired(true)
+        .addChoices(
+          { name: 'invites — Discord invite links', value: 'invites' },
+          { name: 'spam — Spam / repeated text', value: 'spam' },
+          { name: 'mentions — Mass mentions (5+)', value: 'mentions' },
+          { name: 'caps — Excessive caps (>70%)', value: 'caps' },
+          { name: 'links — All external links', value: 'links' },
+          { name: 'slurs — Hate speech / slurs', value: 'slurs' },
+          { name: 'all — Enable every filter', value: 'all' }
+        )))
+    .addSubcommand(sub => sub.setName('disable').setDescription('Disable an automod filter')
+      .addStringOption(o => o.setName('filter').setDescription('Which filter to disable').setRequired(true)
+        .addChoices(
+          { name: 'invites', value: 'invites' }, { name: 'spam', value: 'spam' },
+          { name: 'mentions', value: 'mentions' }, { name: 'caps', value: 'caps' },
+          { name: 'links', value: 'links' }, { name: 'slurs', value: 'slurs' },
+          { name: 'all — Disable every filter', value: 'all' }
+        )))
+    .addSubcommand(sub => sub.setName('action').setDescription('Set the punishment when a filter triggers')
+      .addStringOption(o => o.setName('type').setDescription('Punishment type').setRequired(true)
+        .addChoices(
+          { name: 'delete — Delete message only', value: 'delete' },
+          { name: 'warn — Delete + warn user', value: 'warn' },
+          { name: 'timeout — Delete + timeout (10 min)', value: 'timeout' },
+          { name: 'kick — Delete + kick user', value: 'kick' }
+        )))
+    .addSubcommand(sub => sub.setName('ignorerole').setDescription('Add or remove a role that bypasses automod')
+      .addRoleOption(o => o.setName('role').setDescription('Role to toggle').setRequired(true)))
     .addSubcommand(sub => sub.setName('status').setDescription('Show current automod config for this server'))
     .setDMPermission(false),
   new SlashCommandBuilder().setName('join').setDescription('Join your voice channel and start listening').setDMPermission(false),
   new SlashCommandBuilder().setName('leave').setDescription('Leave the voice channel').setDMPermission(false),
-
-  // ── TICKET COMMANDS (updated) ──────────────────────────────────
   new SlashCommandBuilder()
     .setName('ticket').setDescription('Open a support ticket')
     .addStringOption(o => o.setName('reason').setDescription('What do you need help with?').setRequired(true))
-    // Panel option — user picks which panel type to open
     .addStringOption(o => o.setName('panel').setDescription('Which ticket panel to use (default: support)').setRequired(false))
     .setDMPermission(false),
-
   new SlashCommandBuilder().setName('closeticket').setDescription('Close this support ticket').setDMPermission(false),
   new SlashCommandBuilder()
     .setName('addtoticket').setDescription('Add a user to this ticket')
@@ -1251,112 +1121,59 @@ new SlashCommandBuilder()
     .setName('setticketcategory').setDescription('Set the category where ticket channels are created (admin only)')
     .addStringOption(o => o.setName('categoryid').setDescription('Category ID').setRequired(true))
     .setDMPermission(false),
-
-  // ── /setuppanel — now takes optional panel ID ─────────────────
   new SlashCommandBuilder()
-    .setName('setuppanel').setDescription('Post a ticket panel embed in this channel (admin only)')
-    .addStringOption(o =>
-      o.setName('panel')
-        .setDescription('Panel ID to post (e.g. support, sales, appeals). Leave blank to see all panels.')
-        .setRequired(false)
-    )
+    .setName('setuppanel').setDescription('Post ticket panel(s) in this channel (admin only)')
+    .addStringOption(o => o.setName('panel').setDescription('Panel ID to post individually. Leave blank to post all panels as one embed with buttons.').setRequired(false))
     .setDMPermission(false),
-
-  // ── /listpanels — list all configured panels ──────────────────
-  new SlashCommandBuilder()
-    .setName('listpanels').setDescription('List all ticket panels configured for this server')
-    .setDMPermission(false),
-
-  // ── APPLICATION COMMANDS ────────────────────────────────────────
+  new SlashCommandBuilder().setName('listpanels').setDescription('List all ticket panels configured for this server').setDMPermission(false),
   new SlashCommandBuilder()
     .setName('setupapplication').setDescription('Post an application panel embed in this channel (admin only)')
-    .addStringOption(o =>
-      o.setName('panel')
-        .setDescription('Application panel ID to post. Leave blank to see all panels.')
-        .setRequired(false)
-    )
+    .addStringOption(o => o.setName('panel').setDescription('Application panel ID to post.').setRequired(false))
     .setDMPermission(false),
-
+  new SlashCommandBuilder().setName('listapplications').setDescription('List all application panels configured for this server').setDMPermission(false),
   new SlashCommandBuilder()
-    .setName('listapplications').setDescription('List all application panels configured for this server')
+    .setName('broadcast').setDescription('Send a message to all servers (owner only)')
+    .addStringOption(o => o.setName('message').setDescription('Message to broadcast').setRequired(true))
+    .setDMPermission(true),
+  new SlashCommandBuilder()
+    .setName('setbroadcastchannel').setDescription('Set the channel where owner broadcasts are received')
+    .addChannelOption(o => o.setName('channel').setDescription('Channel to receive broadcasts').setRequired(true))
     .setDMPermission(false),
-
-
- new SlashCommandBuilder()
-  .setName('broadcast')
-  .setDescription('Send a message to all servers (owner only)')
-  .addStringOption(o => o.setName('message').setDescription('Message to broadcast').setRequired(true))
-  .setDMPermission(true),
-
   new SlashCommandBuilder()
-  .setName('setbroadcastchannel')
-  .setDescription('Set the channel where owner broadcasts are received')
-  .addChannelOption(o => o.setName('channel').setDescription('Channel to receive broadcasts').setRequired(true))
-  .setDMPermission(false),
-
-
-  new SlashCommandBuilder()
-  .setName('giveaway')
-  .setDescription('Giveaway commands')
-  .addSubcommand(sub =>
-    sub.setName('start').setDescription('Start a giveaway')
+    .setName('giveaway').setDescription('Giveaway commands')
+    .addSubcommand(sub => sub.setName('start').setDescription('Start a giveaway')
       .addStringOption(o => o.setName('prize').setDescription('What are you giving away?').setRequired(true))
       .addIntegerOption(o => o.setName('minutes').setDescription('Duration in minutes').setRequired(true).setMinValue(1).setMaxValue(10080))
-      .addIntegerOption(o => o.setName('winners').setDescription('Number of winners').setRequired(false).setMinValue(1).setMaxValue(20))
-  )
-  .addSubcommand(sub =>
-    sub.setName('end').setDescription('End a giveaway early')
-      .addStringOption(o => o.setName('messageid').setDescription('Message ID of the giveaway').setRequired(true))
-  )
-  .addSubcommand(sub =>
-    sub.setName('reroll').setDescription('Reroll a giveaway winner')
-      .addStringOption(o => o.setName('messageid').setDescription('Message ID of the giveaway').setRequired(true))
-  ),
-
+      .addIntegerOption(o => o.setName('winners').setDescription('Number of winners').setRequired(false).setMinValue(1).setMaxValue(20)))
+    .addSubcommand(sub => sub.setName('end').setDescription('End a giveaway early')
+      .addStringOption(o => o.setName('messageid').setDescription('Message ID of the giveaway').setRequired(true)))
+    .addSubcommand(sub => sub.setName('reroll').setDescription('Reroll a giveaway winner')
+      .addStringOption(o => o.setName('messageid').setDescription('Message ID of the giveaway').setRequired(true))),
   new SlashCommandBuilder()
-  .setName('setnotify')
-  .setDescription('Configure social media notifications for this server')
-  .addSubcommand(sub =>
-    sub.setName('youtube')
-      .setDescription('Add a YouTube channel to watch')
+    .setName('setnotify').setDescription('Configure social media notifications for this server')
+    .addSubcommand(sub => sub.setName('youtube').setDescription('Add a YouTube channel to watch')
       .addStringOption(o => o.setName('channelid').setDescription('YouTube channel ID (starts with UC...)').setRequired(true))
       .addChannelOption(o => o.setName('channel').setDescription('Discord channel to post alerts in').setRequired(true))
-      .addRoleOption(o => o.setName('pingrole').setDescription('Role to ping (optional)').setRequired(false))
-  )
-  .addSubcommand(sub =>
-    sub.setName('twitch')
-      .setDescription('Add a Twitch streamer to watch')
+      .addRoleOption(o => o.setName('pingrole').setDescription('Role to ping (optional)').setRequired(false)))
+    .addSubcommand(sub => sub.setName('twitch').setDescription('Add a Twitch streamer to watch')
       .addStringOption(o => o.setName('username').setDescription('Twitch username').setRequired(true))
       .addChannelOption(o => o.setName('channel').setDescription('Discord channel to post alerts in').setRequired(true))
-      .addRoleOption(o => o.setName('pingrole').setDescription('Role to ping when they go live (optional)').setRequired(false))
-  )
-  .addSubcommand(sub =>
-    sub.setName('remove')
-      .setDescription('Remove a tracked account')
-      .addStringOption(o =>
-        o.setName('platform').setDescription('Platform').setRequired(true)
-          .addChoices(
-            { name: 'YouTube', value: 'youtube' },
-            { name: 'Twitch',  value: 'twitch'  },
-          )
-      )
-      .addStringOption(o => o.setName('username').setDescription('Channel ID or username to remove').setRequired(true))
-  )
-  .addSubcommand(sub =>
-    sub.setName('list').setDescription('Show all tracked accounts for this server')
-  )
-  .setDMPermission(false),
-
+      .addRoleOption(o => o.setName('pingrole').setDescription('Role to ping when they go live (optional)').setRequired(false)))
+    .addSubcommand(sub => sub.setName('remove').setDescription('Remove a tracked account')
+      .addStringOption(o => o.setName('platform').setDescription('Platform').setRequired(true)
+        .addChoices({ name: 'YouTube', value: 'youtube' }, { name: 'Twitch', value: 'twitch' }))
+      .addStringOption(o => o.setName('username').setDescription('Channel ID or username to remove').setRequired(true)))
+    .addSubcommand(sub => sub.setName('list').setDescription('Show all tracked accounts for this server'))
+    .setDMPermission(false),
   new SlashCommandBuilder()
-      .setName('setvoicechannel')
-      .setDescription('Set the voice channel JARVIS joins 24/7 and listens in')
-      .addChannelOption(o => o.setName('channel').setDescription('Voice channel').setRequired(true).addChannelTypes(2))
-      .setDMPermission(false),
-    new SlashCommandBuilder()
-      .setName('leavevoice')
-      .setDescription('Make JARVIS leave the voice channel')
-      .setDMPermission(false),
-
+    .setName('setvoicechannel').setDescription('Set the voice channel JARVIS joins 24/7 and listens in')
+    .addChannelOption(o => o.setName('channel').setDescription('Voice channel').setRequired(true).addChannelTypes(2))
+    .setDMPermission(false),
+  new SlashCommandBuilder().setName('leavevoice').setDescription('Make JARVIS leave the voice channel').setDMPermission(false),
+  // /vote — top.gg voting for free premium
+  new SlashCommandBuilder()
+    .setName('vote').setDescription('Vote for JARVIS on top.gg and earn 30 days of free Premium for your server!')
+    .setDMPermission(true),
 ].map(c => c.toJSON());
 
 // =========================
@@ -1381,15 +1198,14 @@ client.once('clientReady', async () => {
     status: "online"
   });
 
-  console.log(`ONLINE 🔥 als ${client.user.tag}`);
+  console.log(`ONLINE 🔥 as ${client.user.tag}`);
   await deployCommands();
   setInterval(loadDashboardConfig, 15_000);
 
   initSocialNotifications(client, redis, () => dashboardConfig, EmbedBuilder);
 
-  // ── VOICE ASSISTANT INIT ─────────────────────────────────
   const voiceDeps = {
-    groq, // your existing groq client — works fine for Whisper too
+    groq,
     getReplyForVoice: async ({ guildId, userId, transcript }) => {
       const activeMode = getActiveMode(guildId);
       const modeData = MODES[activeMode];
@@ -1407,22 +1223,16 @@ client.once('clientReady', async () => {
   };
 
   await initVoiceAssistant(client, () => dashboardConfig, voiceDeps);
-
-  // ⭐ Enforce Voice Assistant premium gating on a recurring basis.
-  // Disconnects any guild whose voiceChannels entry exists but is no
-  // longer premium (covers: pre-existing free setups, and refunds/
-  // expirations that happen while a connection is already active).
   setInterval(() => enforceVoicePremium(client, voiceDeps), 15_000);
-  // Run once immediately on boot too, so stale free setups don't survive a restart.
   enforceVoicePremium(client, voiceDeps);
 });
 
-function enforceVoicePremium(client, voiceDeps) {
+async function enforceVoicePremium(client, voiceDeps) {
   const voiceChannels = dashboardConfig.voiceChannels || {};
   for (const guildId of Object.keys(voiceChannels)) {
-    if (!isGuildPremium(guildId)) {
-      console.log(`[Voice] Guild ${guildId} lost/lacks premium — disconnecting voice assistant.`);
-      try { leaveVoice(guildId); } catch (err) { console.error('[Voice] enforceVoicePremium leaveVoice failed:', err.message); }
+    if (!(await isGuildPremium(guildId))) {
+      console.log(`[Voice] Guild ${guildId} lost/lacks premium — disconnecting.`);
+      try { leaveVoice(guildId); } catch (err) { console.error('[Voice] enforceVoicePremium error:', err.message); }
       delete dashboardConfig.voiceChannels[guildId];
       saveDashboardConfig(dashboardConfig).catch(() => {});
     }
@@ -1430,18 +1240,12 @@ function enforceVoicePremium(client, voiceDeps) {
 }
 
 // =========================
-// GUILD JOIN — Welcome DM to server owner
+// GUILD JOIN
 // =========================
 client.on('guildCreate', async (guild) => {
   console.log(`✅ Joined new guild: ${guild.name} (${guild.id})`);
-
-  // Try to find someone to send to — prefer owner
   let target = null;
-  try {
-    const owner = await guild.fetchOwner();
-    target = owner.user;
-  } catch {}
-
+  try { const owner = await guild.fetchOwner(); target = owner.user; } catch {}
   if (!target) return;
 
   const embed = new EmbedBuilder()
@@ -1452,39 +1256,22 @@ client.on('guildCreate', async (guild) => {
     .addFields(
       { name: '⚙️ Dashboard', value: '[Configure your settings](https://jarvisbot-rust.vercel.app/dashboard.html)', inline: true },
       { name: '💬 Support Server', value: '[Join here](https://discord.gg/5NtU3eFBrM)', inline: true },
-      { name: '📨 Invite JARVIS', value: '[Invite link](https://jarvisbot-rust.vercel.app/)', inline: true }
+      { name: '⭐ Vote for Free Premium', value: `[Vote on top.gg](https://top.gg/bot/${BOT_ID}/vote)`, inline: true }
     )
     .setThumbnail(client.user.displayAvatarURL({ size: 256 }))
     .setFooter({ text: 'JARVIS • Built by W.Idoe known as AimZz' })
     .setTimestamp();
 
   const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setLabel('💬 Join Support Server')
-      .setStyle(ButtonStyle.Link)
-      .setURL('https://discord.gg/5NtU3eFBrM'),
-    new ButtonBuilder()
-      .setLabel('⚙️ Dashboard')
-      .setStyle(ButtonStyle.Link)
-      .setURL('https://jarvisbot-rust.vercel.app/dashboard.html'),
-    new ButtonBuilder()
-      .setLabel('📖 Commands')
-      .setStyle(ButtonStyle.Link)
-      .setURL('https://jarvisbot-rust.vercel.app/')
+    new ButtonBuilder().setLabel('💬 Join Support Server').setStyle(ButtonStyle.Link).setURL('https://discord.gg/5NtU3eFBrM'),
+    new ButtonBuilder().setLabel('⚙️ Dashboard').setStyle(ButtonStyle.Link).setURL('https://jarvisbot-rust.vercel.app/dashboard.html'),
+    new ButtonBuilder().setLabel('⭐ Vote for Premium').setStyle(ButtonStyle.Link).setURL(`https://top.gg/bot/${BOT_ID}/vote`)
   );
 
-  try {
-    await target.send({ embeds: [embed], components: [row] });
-  } catch (err) {
-    // Owner has DMs off — try first text channel instead
-    const channel = guild.channels.cache.find(
-      c => c.isTextBased() && c.permissionsFor(guild.members.me)?.has('SendMessages')
-    );
-    if (channel) {
-      try {
-        await channel.send({ content: `👋 Hey! Thanks for adding me. <@${target.id}>`, embeds: [embed], components: [row] });
-      } catch {}
-    }
+  try { await target.send({ embeds: [embed], components: [row] }); }
+  catch {
+    const channel = guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(guild.members.me)?.has('SendMessages'));
+    if (channel) { try { await channel.send({ content: `👋 Hey! Thanks for adding me. <@${target.id}>`, embeds: [embed], components: [row] }); } catch {} }
   }
 });
 
@@ -1513,56 +1300,47 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // ── Panel create ticket button ─────────────────────────────────
-  // customId format: panel_create_ticket__<panelId>
-if (interaction.isButton() && interaction.customId.startsWith('panel_create_ticket')) {
-  if (!interaction.guild) return;
-  const parts = interaction.customId.split('__');
-  const panelId = parts[1] || 'support';
-  const panel = getPanel(interaction.guild.id, panelId);
-  const questions = panel.questions || [];
+  // ── Panel create ticket button — customId: panel_create_ticket__<panelId> ──
+  if (interaction.isButton() && interaction.customId.startsWith('panel_create_ticket')) {
+    if (!interaction.guild) return;
+    const parts = interaction.customId.split('__');
+    const panelId = parts[1] || 'support';
+    const panel = getPanel(interaction.guild.id, panelId);
+    const questions = panel.questions || [];
 
-  // If no questions configured, create ticket immediately
-  if (questions.length === 0) {
-    try {
-      const result = await createTicketChannel(interaction.guild, interaction.user, null, panelId, []);
-      if (result.error) return interaction.reply({ content: result.error, flags: 64 });
-      return interaction.reply({ content: `✅ Your ticket has been opened: <#${result.channelId}>`, flags: 64 });
-    } catch (err) {
-      console.error('[Panel Ticket] create failed:', err);
-      return interaction.reply({ content: '❌ Failed to create ticket. Make sure I have **Manage Channels** permission.', flags: 64 });
+    if (questions.length === 0) {
+      try {
+        const result = await createTicketChannel(interaction.guild, interaction.user, null, panelId, []);
+        if (result.error) return interaction.reply({ content: result.error, flags: 64 });
+        return interaction.reply({ content: `✅ Your ticket has been opened: <#${result.channelId}>`, flags: 64 });
+      } catch (err) {
+        console.error('[Panel Ticket] create failed:', err);
+        return interaction.reply({ content: '❌ Failed to create ticket. Make sure I have **Manage Channels** permission.', flags: 64 });
+      }
     }
+
+    const modal = new ModalBuilder()
+      .setCustomId(`ticket_modal__${panelId}`)
+      .setTitle((panel.title || 'Open a Ticket').slice(0, 45));
+
+    questions.slice(0, 5).forEach((q, i) => {
+      const input = new TextInputBuilder()
+        .setCustomId(`q_${i}`).setLabel(q.slice(0, 45))
+        .setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(500);
+      modal.addComponents(new ActionRowBuilder().addComponents(input));
+    });
+
+    return interaction.showModal(modal);
   }
 
-  // Build modal with questions
-  const modal = new ModalBuilder()
-    .setCustomId(`ticket_modal__${panelId}`)
-    .setTitle(panel.title || 'Open a Ticket');
-
-  questions.slice(0, 5).forEach((q, i) => {
-    const input = new TextInputBuilder()
-      .setCustomId(`q_${i}`)
-      .setLabel(q.slice(0, 45))
-      .setStyle(TextInputStyle.Paragraph)
-      .setRequired(true)
-      .setMaxLength(500);
-    modal.addComponents(new ActionRowBuilder().addComponents(input));
-  });
-
-  return interaction.showModal(modal);
-}
-
-  // ── Application panel apply button ──────────────────────────────
-  // customId format: app_create__<panelId>
+  // ── Application panel apply button — customId: app_create__<panelId> ──
   if (interaction.isButton() && interaction.customId.startsWith('app_create__')) {
     if (!interaction.guild) return;
     const panelId = interaction.customId.split('__')[1] || 'application';
     const panel = getApplicationPanel(interaction.guild.id, panelId);
 
     const hoursLeft = await checkApplicationCooldown(interaction.guild.id, panel.id, interaction.user.id, panel.cooldownHours);
-    if (hoursLeft) {
-      return interaction.reply({ content: `⏳ You've already applied recently. You can apply again in **${hoursLeft} hour(s)**.`, flags: 64 });
-    }
+    if (hoursLeft) return interaction.reply({ content: `⏳ You've already applied recently. You can apply again in **${hoursLeft} hour(s)**.`, flags: 64 });
 
     if (panel.requireRoleId) {
       const hasRole = interaction.member?.roles.cache.has(panel.requireRoleId);
@@ -1570,9 +1348,7 @@ if (interaction.isButton() && interaction.customId.startsWith('panel_create_tick
     }
 
     const questions = panel.questions || [];
-    if (questions.length === 0) {
-      return interaction.reply({ content: '❌ This application has no questions configured. Contact a server admin.', flags: 64 });
-    }
+    if (questions.length === 0) return interaction.reply({ content: '❌ This application has no questions configured. Contact a server admin.', flags: 64 });
 
     const modal = new ModalBuilder()
       .setCustomId(`application_modal__${panel.id}`)
@@ -1580,43 +1356,32 @@ if (interaction.isButton() && interaction.customId.startsWith('panel_create_tick
 
     questions.slice(0, 5).forEach((q, i) => {
       const input = new TextInputBuilder()
-        .setCustomId(`aq_${i}`)
-        .setLabel(q.slice(0, 45))
-        .setStyle(TextInputStyle.Paragraph)
-        .setRequired(true)
-        .setMaxLength(1000);
+        .setCustomId(`aq_${i}`).setLabel(q.slice(0, 45))
+        .setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(1000);
       modal.addComponents(new ActionRowBuilder().addComponents(input));
     });
 
     return interaction.showModal(modal);
   }
 
-  // ── Application accept/deny buttons ─────────────────────────────
-  // customId format: app_accept_<panelId>_<applicantId>  /  app_deny_<panelId>_<applicantId>
+  // ── Application accept/deny buttons ───────────────────────────
   if (interaction.isButton() && (interaction.customId.startsWith('app_accept_') || interaction.customId.startsWith('app_deny_'))) {
     if (!interaction.guild) return;
-    if (!interaction.member.permissions.has('ManageGuild')) {
-      return interaction.reply({ content: '❌ Only staff with **Manage Server** permission can decide on applications.', flags: 64 });
-    }
+    if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ Only staff with **Manage Server** permission can decide on applications.', flags: 64 });
 
     const isAccept = interaction.customId.startsWith('app_accept_');
-    const rest = interaction.customId.replace(isAccept ? 'app_accept_' : 'app_deny_', '');
-    const lastUnderscore = rest.lastIndexOf('_');
-    const panelId = rest.slice(0, lastUnderscore);
-    const applicantId = rest.slice(lastUnderscore + 1);
+    const rest2 = interaction.customId.replace(isAccept ? 'app_accept_' : 'app_deny_', '');
+    const lastUnderscore = rest2.lastIndexOf('_');
+    const panelId = rest2.slice(0, lastUnderscore);
+    const applicantId = rest2.slice(lastUnderscore + 1);
     const panel = getApplicationPanel(interaction.guild.id, panelId);
 
     const oldEmbed = interaction.message.embeds[0];
     if (!oldEmbed) return interaction.reply({ content: '❌ Could not read this application.', flags: 64 });
 
-    const statusText = isAccept
-      ? `✅ Accepted by <@${interaction.user.id}>`
-      : `❌ Denied by <@${interaction.user.id}>`;
-
+    const statusText = isAccept ? `✅ Accepted by <@${interaction.user.id}>` : `❌ Denied by <@${interaction.user.id}>`;
     const fields = oldEmbed.fields.map(f => f.name === 'Status' ? { name: 'Status', value: statusText } : f);
-    const updatedEmbed = EmbedBuilder.from(oldEmbed)
-      .setColor(isAccept ? 0x22c55e : 0xed4245)
-      .setFields(fields);
+    const updatedEmbed = EmbedBuilder.from(oldEmbed).setColor(isAccept ? 0x22c55e : 0xed4245).setFields(fields);
 
     const disabledRow = new ActionRowBuilder().addComponents(
       ButtonBuilder.from(interaction.message.components[0].components[0]).setDisabled(true),
@@ -1631,20 +1396,14 @@ if (interaction.isButton() && interaction.customId.startsWith('panel_create_tick
         .setColor(isAccept ? 0x22c55e : 0xed4245)
         .setTitle(isAccept ? '✅ Application Accepted' : '❌ Application Denied')
         .setDescription(`Your **${panel.name || panel.title || 'application'}** for **${interaction.guild.name}** has been ${isAccept ? 'accepted' : 'denied'}.`)
-        .setFooter({ text: `JARVIS Applications • ${interaction.guild.name}` })
-        .setTimestamp();
+        .setFooter({ text: `JARVIS Applications • ${interaction.guild.name}` }).setTimestamp();
       await applicant.send({ embeds: [dmEmbed] });
-    } catch (err) {
-      console.error('[Application] failed to DM applicant:', err.message);
-    }
+    } catch (err) { console.error('[Application] failed to DM applicant:', err.message); }
 
     await pushLogEvent(interaction.guild.id, {
-      type: 'applicationDecision',
-      userId: applicantId,
-      username: applicantId,
+      type: 'applicationDecision', userId: applicantId, username: applicantId,
       detail: `${isAccept ? 'Accepted' : 'Denied'} "${panel.name || panel.id}" application by ${interaction.user.tag}`
     });
-
     return;
   }
 
@@ -1663,312 +1422,190 @@ if (interaction.isButton() && interaction.customId.startsWith('panel_create_tick
     return;
   }
 
-
   // ── Tic Tac Toe buttons ────────────────────────────────────────
-if (interaction.isButton() && interaction.customId.startsWith('ttt_')) {
-  const parts = interaction.customId.split('_');
-  const ownerId = parts[1];
-  const cell = parseInt(parts[2]) - 1;
+  if (interaction.isButton() && interaction.customId.startsWith('ttt_')) {
+    const parts = interaction.customId.split('_');
+    const ownerId = parts[1];
+    const cell = parseInt(parts[2]) - 1;
+    if (interaction.user.id !== ownerId) return interaction.reply({ content: '❌ This is not your game!', flags: 64 });
+    const gameKey = `ttt-${interaction.user.id}`;
+    const game = memory[gameKey];
+    if (!game) return interaction.reply({ content: '❌ No active game. Use `/tictactoe` to start.', flags: 64 });
+    if (game.board[cell] === 'X' || game.board[cell] === 'O') return interaction.reply({ content: '❌ That cell is already taken!', flags: 64 });
 
-  if (interaction.user.id !== ownerId) {
-    return interaction.reply({ content: '❌ This is not your game!', flags: 64 });
-  }
+    const checkWin = (board, mark) => {
+      const wins = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+      return wins.some(combo => combo.every(i => board[i] === mark));
+    };
+    const renderBoard = (board) => {
+      const rows = [board.slice(0,3), board.slice(3,6), board.slice(6,9)];
+      return rows.map(row => row.map(c => c === 'X' ? '❌' : c === 'O' ? '⭕' : `${c}️⃣`).join('')).join('\n');
+    };
 
-  const gameKey = `ttt-${interaction.user.id}`;
-  const game = memory[gameKey];
-  if (!game) return interaction.reply({ content: '❌ No active game. Use `/tictactoe` to start.', flags: 64 });
-  if (game.board[cell] === 'X' || game.board[cell] === 'O') {
-    return interaction.reply({ content: '❌ That cell is already taken!', flags: 64 });
-  }
-
-  const checkWin = (board, mark) => {
-    const wins = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
-    return wins.some(combo => combo.every(i => board[i] === mark));
-  };
-
-  const renderBoard = (board) => {
-    const rows = [board.slice(0,3), board.slice(3,6), board.slice(6,9)];
-    return rows.map(row => row.map(c => c === 'X' ? '❌' : c === 'O' ? '⭕' : `${c}️⃣`).join('')).join('\n');
-  };
-
-  // Player move
-  game.board[cell] = 'X';
-  if (checkWin(game.board, 'X')) {
-    delete memory[gameKey];
-    await saveMemory(memory);
-    return interaction.update({ content: `${renderBoard(game.board)}\n\n🎉 **You win!** Well played!`, components: [] });
-  }
-
-  const empty = game.board.map((v, i) => v !== 'X' && v !== 'O' ? i : null).filter(v => v !== null);
-  if (empty.length === 0) {
-    delete memory[gameKey];
-    await saveMemory(memory);
-    return interaction.update({ content: `${renderBoard(game.board)}\n\n🤝 **It's a draw!**`, components: [] });
-  }
-
-  // JARVIS move (tries to win, block, or random)
-  const findBestMove = (mark) => {
-    const wins = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
-    for (const combo of wins) {
-      const marks = combo.filter(i => game.board[i] === mark);
-      const empties = combo.filter(i => game.board[i] !== 'X' && game.board[i] !== 'O');
-      if (marks.length === 2 && empties.length === 1) return empties[0];
+    game.board[cell] = 'X';
+    if (checkWin(game.board, 'X')) {
+      delete memory[gameKey]; await saveMemory(memory);
+      return interaction.update({ content: `${renderBoard(game.board)}\n\n🎉 **You win!** Well played!`, components: [] });
     }
-    return null;
-  };
-
-  const jarvisMove = findBestMove('O') ?? findBestMove('X') ?? (game.board[4] !== 'X' && game.board[4] !== 'O' ? 4 : empty[Math.floor(Math.random() * empty.length)]);
-  game.board[jarvisMove] = 'O';
-
-  if (checkWin(game.board, 'O')) {
-    delete memory[gameKey];
+    const empty = game.board.map((v, i) => v !== 'X' && v !== 'O' ? i : null).filter(v => v !== null);
+    if (empty.length === 0) {
+      delete memory[gameKey]; await saveMemory(memory);
+      return interaction.update({ content: `${renderBoard(game.board)}\n\n🤝 **It's a draw!**`, components: [] });
+    }
+    const findBestMove = (mark) => {
+      const wins = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+      for (const combo of wins) {
+        const marks = combo.filter(i => game.board[i] === mark);
+        const empties = combo.filter(i => game.board[i] !== 'X' && game.board[i] !== 'O');
+        if (marks.length === 2 && empties.length === 1) return empties[0];
+      }
+      return null;
+    };
+    const jarvisMove = findBestMove('O') ?? findBestMove('X') ?? (game.board[4] !== 'X' && game.board[4] !== 'O' ? 4 : empty[Math.floor(Math.random() * empty.length)]);
+    game.board[jarvisMove] = 'O';
+    if (checkWin(game.board, 'O')) {
+      delete memory[gameKey]; await saveMemory(memory);
+      return interaction.update({ content: `${renderBoard(game.board)}\n\n😈 **JARVIS wins!** Better luck next time.`, components: [] });
+    }
+    const empty2 = game.board.map((v, i) => v !== 'X' && v !== 'O' ? i : null).filter(v => v !== null);
+    if (empty2.length === 0) {
+      delete memory[gameKey]; await saveMemory(memory);
+      return interaction.update({ content: `${renderBoard(game.board)}\n\n🤝 **It's a draw!**`, components: [] });
+    }
     await saveMemory(memory);
-    return interaction.update({ content: `${renderBoard(game.board)}\n\n😈 **JARVIS wins!** Better luck next time.`, components: [] });
+    const row = new ActionRowBuilder().addComponents(game.board.slice(0,5).map((v, i) => new ButtonBuilder().setCustomId(`ttt_${ownerId}_${i+1}`).setLabel(v === 'X' ? 'X' : v === 'O' ? 'O' : `${i+1}`).setStyle(v === 'X' ? ButtonStyle.Danger : v === 'O' ? ButtonStyle.Success : ButtonStyle.Secondary).setDisabled(v === 'X' || v === 'O')));
+    const row2 = new ActionRowBuilder().addComponents(game.board.slice(5).map((v, i) => new ButtonBuilder().setCustomId(`ttt_${ownerId}_${i+6}`).setLabel(v === 'X' ? 'X' : v === 'O' ? 'O' : `${i+6}`).setStyle(v === 'X' ? ButtonStyle.Danger : v === 'O' ? ButtonStyle.Success : ButtonStyle.Secondary).setDisabled(v === 'X' || v === 'O')));
+    return interaction.update({ content: `❌ **Tic Tac Toe** — Your turn!\n\n${renderBoard(game.board)}`, components: [row, row2] });
   }
 
-  const empty2 = game.board.map((v, i) => v !== 'X' && v !== 'O' ? i : null).filter(v => v !== null);
-  if (empty2.length === 0) {
-    delete memory[gameKey];
-    await saveMemory(memory);
-    return interaction.update({ content: `${renderBoard(game.board)}\n\n🤝 **It's a draw!**`, components: [] });
-  }
-
-  await saveMemory(memory);
-
-  const row = new ActionRowBuilder().addComponents(
-    game.board.slice(0,5).map((v, i) =>
-      new ButtonBuilder()
-        .setCustomId(`ttt_${ownerId}_${i+1}`)
-        .setLabel(v === 'X' ? 'X' : v === 'O' ? 'O' : `${i+1}`)
-        .setStyle(v === 'X' ? ButtonStyle.Danger : v === 'O' ? ButtonStyle.Success : ButtonStyle.Secondary)
-        .setDisabled(v === 'X' || v === 'O')
-    )
-  );
-  const row2 = new ActionRowBuilder().addComponents(
-    game.board.slice(5).map((v, i) =>
-      new ButtonBuilder()
-        .setCustomId(`ttt_${ownerId}_${i+6}`)
-        .setLabel(v === 'X' ? 'X' : v === 'O' ? 'O' : `${i+6}`)
-        .setStyle(v === 'X' ? ButtonStyle.Danger : v === 'O' ? ButtonStyle.Success : ButtonStyle.Secondary)
-        .setDisabled(v === 'X' || v === 'O')
-    )
-  );
-
-  return interaction.update({
-    content: `❌ **Tic Tac Toe** — Your turn!\n\n${renderBoard(game.board)}`,
-    components: [row, row2]
-  });
-}
-
-// ── Giveaway enter button ──────────────────────────────────────
-if (interaction.isButton() && interaction.customId.startsWith('giveaway_enter_')) {
-  const messageId = interaction.customId.split('giveaway_enter_')[1];
-  const key = `giveaway-${messageId}`;
-
-  try {
-    const data = await redis.get(key);
-    if (!data) return interaction.reply({ content: '❌ Giveaway not found.', flags: 64 });
-
-    const giveaway = typeof data === 'string' ? JSON.parse(data) : data;
-    if (giveaway.ended) return interaction.reply({ content: '❌ This giveaway has already ended.', flags: 64 });
-
-    giveaway.entries = giveaway.entries || [];
-
-    if (giveaway.entries.includes(interaction.user.id)) {
-      // Toggle — let them leave
-      giveaway.entries = giveaway.entries.filter(id => id !== interaction.user.id);
-      await redis.set(key, JSON.stringify(giveaway));
-
-      // Update embed entry count
-      const msg = await interaction.channel.messages.fetch(messageId);
-      const oldEmbed = msg.embeds[0];
-      const updatedEmbed = EmbedBuilder.from(oldEmbed)
-        .spliceFields(0, oldEmbed.fields.length,
+  // ── Giveaway enter button ──────────────────────────────────────
+  if (interaction.isButton() && interaction.customId.startsWith('giveaway_enter_')) {
+    const messageId = interaction.customId.split('giveaway_enter_')[1];
+    const key = `giveaway-${messageId}`;
+    try {
+      const data = await redis.get(key);
+      if (!data) return interaction.reply({ content: '❌ Giveaway not found.', flags: 64 });
+      const giveaway = typeof data === 'string' ? JSON.parse(data) : data;
+      if (giveaway.ended) return interaction.reply({ content: '❌ This giveaway has already ended.', flags: 64 });
+      giveaway.entries = giveaway.entries || [];
+      if (giveaway.entries.includes(interaction.user.id)) {
+        giveaway.entries = giveaway.entries.filter(id => id !== interaction.user.id);
+        await redis.set(key, JSON.stringify(giveaway));
+        const msg = await interaction.channel.messages.fetch(messageId);
+        const oldEmbed = msg.embeds[0];
+        const updatedEmbed = EmbedBuilder.from(oldEmbed).spliceFields(0, oldEmbed.fields.length,
           { name: '🎟️ Entries', value: `${giveaway.entries.length}`, inline: true },
           { name: '🏆 Winners', value: `${giveaway.winnerCount}`, inline: true },
           { name: '🎟️ Hosted by', value: `<@${giveaway.hostId}>`, inline: true }
         );
-      await msg.edit({ embeds: [updatedEmbed] });
-
-      return interaction.reply({ content: '↩️ You left the giveaway.', flags: 64 });
-    }
-
-    giveaway.entries.push(interaction.user.id);
-    await redis.set(key, JSON.stringify(giveaway));
-
-    // Update embed entry count
-    const msg = await interaction.channel.messages.fetch(messageId);
-    const oldEmbed = msg.embeds[0];
-    const updatedEmbed = EmbedBuilder.from(oldEmbed)
-      .spliceFields(0, oldEmbed.fields.length,
+        await msg.edit({ embeds: [updatedEmbed] });
+        return interaction.reply({ content: '↩️ You left the giveaway.', flags: 64 });
+      }
+      giveaway.entries.push(interaction.user.id);
+      await redis.set(key, JSON.stringify(giveaway));
+      const msg = await interaction.channel.messages.fetch(messageId);
+      const oldEmbed = msg.embeds[0];
+      const updatedEmbed = EmbedBuilder.from(oldEmbed).spliceFields(0, oldEmbed.fields.length,
         { name: '🎟️ Entries', value: `${giveaway.entries.length}`, inline: true },
         { name: '🏆 Winners', value: `${giveaway.winnerCount}`, inline: true },
         { name: '🎟️ Hosted by', value: `<@${giveaway.hostId}>`, inline: true }
       );
-    await msg.edit({ embeds: [updatedEmbed] });
-
-    return interaction.reply({ content: '🎉 You entered the giveaway! Good luck!', flags: 64 });
-  } catch (err) {
-    console.error('[Giveaway] enter error:', err);
-    return interaction.reply({ content: '❌ Something went wrong.', flags: 64 });
+      await msg.edit({ embeds: [updatedEmbed] });
+      return interaction.reply({ content: '🎉 You entered the giveaway! Good luck!', flags: 64 });
+    } catch (err) {
+      console.error('[Giveaway] enter error:', err);
+      return interaction.reply({ content: '❌ Something went wrong.', flags: 64 });
+    }
   }
-}
 
-
-// ── Ticket modal submit ────────────────────────────────────────
-if (interaction.isModalSubmit() && interaction.customId.startsWith('ticket_modal__')) {
-  if (!interaction.guild) return;
-  const panelId = interaction.customId.split('__')[1] || 'support';
-  const panel = getPanel(interaction.guild.id, panelId);
-  const questions = panel.questions || [];
-
-  const answers = questions.map((q, i) => ({
-    question: q,
-    answer: interaction.fields.getTextInputValue(`q_${i}`) || 'No answer',
-  }));
-
-  await interaction.deferReply({ flags: 64 });
-
-  try {
-    const result = await createTicketChannel(interaction.guild, interaction.user, null, panelId, answers);
-    if (result.error) return interaction.editReply({ content: result.error });
-    return interaction.editReply({ content: `✅ Your ticket has been opened: <#${result.channelId}>` });
-  } catch (err) {
-    console.error('[Ticket Modal] create failed:', err);
-    return interaction.editReply({ content: '❌ Failed to create ticket. Make sure I have **Manage Channels** permission.' });
+  // ── Ticket modal submit ────────────────────────────────────────
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('ticket_modal__')) {
+    if (!interaction.guild) return;
+    const panelId = interaction.customId.split('__')[1] || 'support';
+    const panel = getPanel(interaction.guild.id, panelId);
+    const questions = panel.questions || [];
+    const answers = questions.map((q, i) => ({ question: q, answer: interaction.fields.getTextInputValue(`q_${i}`) || 'No answer' }));
+    await interaction.deferReply({ flags: 64 });
+    try {
+      const result = await createTicketChannel(interaction.guild, interaction.user, null, panelId, answers);
+      if (result.error) return interaction.editReply({ content: result.error });
+      return interaction.editReply({ content: `✅ Your ticket has been opened: <#${result.channelId}>` });
+    } catch (err) {
+      console.error('[Ticket Modal] create failed:', err);
+      return interaction.editReply({ content: '❌ Failed to create ticket. Make sure I have **Manage Channels** permission.' });
+    }
   }
-}
 
-// ── Application modal submit ─────────────────────────────────────
-if (interaction.isModalSubmit() && interaction.customId.startsWith('application_modal__')) {
-  if (!interaction.guild) return;
-  const panelId = interaction.customId.split('__')[1] || 'application';
-  const panel = getApplicationPanel(interaction.guild.id, panelId);
-  const questions = panel.questions || [];
-
-  const answers = questions.map((q, i) => ({
-    question: q,
-    answer: interaction.fields.getTextInputValue(`aq_${i}`) || 'No answer',
-  }));
-
-  await interaction.deferReply({ flags: 64 });
-
-  try {
-    const result = await submitApplication(interaction.guild, interaction.user, panelId, answers);
-    if (result.error) return interaction.editReply({ content: result.error });
-    return interaction.editReply({ content: `✅ Your application has been submitted! Staff will review it soon.` });
-  } catch (err) {
-    console.error('[Application Modal] submit failed:', err);
-    return interaction.editReply({ content: '❌ Failed to submit your application. Contact a server admin.' });
+  // ── Application modal submit ───────────────────────────────────
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('application_modal__')) {
+    if (!interaction.guild) return;
+    const panelId = interaction.customId.split('__')[1] || 'application';
+    const panel = getApplicationPanel(interaction.guild.id, panelId);
+    const questions = panel.questions || [];
+    const answers = questions.map((q, i) => ({ question: q, answer: interaction.fields.getTextInputValue(`aq_${i}`) || 'No answer' }));
+    await interaction.deferReply({ flags: 64 });
+    try {
+      const result = await submitApplication(interaction.guild, interaction.user, panelId, answers);
+      if (result.error) return interaction.editReply({ content: result.error });
+      return interaction.editReply({ content: `✅ Your application has been submitted! Staff will review it soon.` });
+    } catch (err) {
+      console.error('[Application Modal] submit failed:', err);
+      return interaction.editReply({ content: '❌ Failed to submit your application. Contact a server admin.' });
+    }
   }
-}
 
   if (!interaction.isChatInputCommand()) return;
 
   // ── /giveaway ──────────────────────────────────────────────────
-if (interaction.commandName === 'giveaway') {
-  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
-  const sub = interaction.options.getSubcommand();
-
-  // ── start ────────────────────────────────────────────────────
-  if (sub === 'start') {
-    if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
-
-    const prize = interaction.options.getString('prize');
-    const minutes = interaction.options.getInteger('minutes');
-    const winnerCount = interaction.options.getInteger('winners') || 1;
-    const endsAt = Date.now() + minutes * 60 * 1000;
-
-    const embed = new EmbedBuilder()
-      .setColor(0xff73fa)
-      .setTitle('🎉 GIVEAWAY!')
-      .setDescription(`**${prize}**\n\nClick the button below to enter!\nEnds: <t:${Math.floor(endsAt / 1000)}:R> (<t:${Math.floor(endsAt / 1000)}:F>)`)
-      .addFields(
-        { name: '🎟️ Entries', value: '0', inline: true },
-        { name: '🏆 Winners', value: `${winnerCount}`, inline: true },
-        { name: '🎟️ Hosted by', value: `<@${interaction.user.id}>`, inline: true }
-      )
-      .setFooter({ text: 'JARVIS Giveaways • Click to enter!' })
-      .setTimestamp(endsAt);
-
-    await interaction.reply({ content: '✅ Giveaway started!', flags: 64 });
-
-    const giveawayMsg = await interaction.channel.send({ embeds: [embed] });
-
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`giveaway_enter_${giveawayMsg.id}`)
-        .setLabel('🎉 Enter Giveaway')
-        .setStyle(ButtonStyle.Primary)
-    );
-
-    await giveawayMsg.edit({ embeds: [embed], components: [row] });
-
-    // Save to Redis
-    const giveawayData = {
-      prize,
-      winnerCount,
-      hostId: interaction.user.id,
-      channelId: interaction.channel.id,
-      guildId: interaction.guild.id,
-      endsAt,
-      entries: [],
-      ended: false
-    };
-    await redis.set(`giveaway-${giveawayMsg.id}`, JSON.stringify(giveawayData));
-
-    // Set auto-end timer
-    const timer = setTimeout(() => {
-      endGiveaway(interaction.channel, giveawayMsg.id);
-    }, minutes * 60 * 1000);
-    activeGiveaways.set(giveawayMsg.id, timer);
-  }
-
-  // ── end ──────────────────────────────────────────────────────
-  if (sub === 'end') {
-    if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
-
-    const messageId = interaction.options.getString('messageid');
-    await interaction.deferReply({ flags: 64 });
-
-    try {
-      await endGiveaway(interaction.channel, messageId, true);
-      return interaction.editReply('✅ Giveaway ended early!');
-    } catch (err) {
-      return interaction.editReply('❌ Could not find that giveaway in this channel.');
+  if (interaction.commandName === 'giveaway') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    const sub = interaction.options.getSubcommand();
+    if (sub === 'start') {
+      if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
+      const prize = interaction.options.getString('prize');
+      const minutes = interaction.options.getInteger('minutes');
+      const winnerCount = interaction.options.getInteger('winners') || 1;
+      const endsAt = Date.now() + minutes * 60 * 1000;
+      const embed = new EmbedBuilder()
+        .setColor(0xff73fa).setTitle('🎉 GIVEAWAY!')
+        .setDescription(`**${prize}**\n\nClick the button below to enter!\nEnds: <t:${Math.floor(endsAt / 1000)}:R> (<t:${Math.floor(endsAt / 1000)}:F>)`)
+        .addFields({ name: '🎟️ Entries', value: '0', inline: true }, { name: '🏆 Winners', value: `${winnerCount}`, inline: true }, { name: '🎟️ Hosted by', value: `<@${interaction.user.id}>`, inline: true })
+        .setFooter({ text: 'JARVIS Giveaways • Click to enter!' }).setTimestamp(endsAt);
+      await interaction.reply({ content: '✅ Giveaway started!', flags: 64 });
+      const giveawayMsg = await interaction.channel.send({ embeds: [embed] });
+      const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`giveaway_enter_${giveawayMsg.id}`).setLabel('🎉 Enter Giveaway').setStyle(ButtonStyle.Primary));
+      await giveawayMsg.edit({ embeds: [embed], components: [row] });
+      await redis.set(`giveaway-${giveawayMsg.id}`, JSON.stringify({ prize, winnerCount, hostId: interaction.user.id, channelId: interaction.channel.id, guildId: interaction.guild.id, endsAt, entries: [], ended: false }));
+      const timer = setTimeout(() => endGiveaway(interaction.channel, giveawayMsg.id), minutes * 60 * 1000);
+      activeGiveaways.set(giveawayMsg.id, timer);
+    }
+    if (sub === 'end') {
+      if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
+      const messageId = interaction.options.getString('messageid');
+      await interaction.deferReply({ flags: 64 });
+      try { await endGiveaway(interaction.channel, messageId, true); return interaction.editReply('✅ Giveaway ended early!'); }
+      catch { return interaction.editReply('❌ Could not find that giveaway in this channel.'); }
+    }
+    if (sub === 'reroll') {
+      if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
+      const messageId = interaction.options.getString('messageid');
+      await interaction.deferReply({ flags: 64 });
+      try {
+        const key = `giveaway-${messageId}`;
+        const data = await redis.get(key);
+        if (!data) return interaction.editReply('❌ Giveaway not found.');
+        const giveaway = typeof data === 'string' ? JSON.parse(data) : data;
+        const entries = giveaway.entries || [];
+        if (entries.length === 0) return interaction.editReply('❌ No entries to reroll from.');
+        const newWinner = entries[Math.floor(Math.random() * entries.length)];
+        await interaction.channel.send(`🔁 **Reroll!** The new winner is <@${newWinner}>! Congratulations!`);
+        return interaction.editReply('✅ Rerolled!');
+      } catch { return interaction.editReply('❌ Something went wrong.'); }
     }
   }
-
-  // ── reroll ───────────────────────────────────────────────────
-  if (sub === 'reroll') {
-    if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
-
-    const messageId = interaction.options.getString('messageid');
-    await interaction.deferReply({ flags: 64 });
-
-    try {
-      const key = `giveaway-${messageId}`;
-      const data = await redis.get(key);
-      if (!data) return interaction.editReply('❌ Giveaway not found.');
-
-      const giveaway = typeof data === 'string' ? JSON.parse(data) : data;
-      const entries = giveaway.entries || [];
-
-      if (entries.length === 0) return interaction.editReply('❌ No entries to reroll from.');
-
-      const newWinner = entries[Math.floor(Math.random() * entries.length)];
-      await interaction.channel.send(`🔁 **Reroll!** The new winner is <@${newWinner}>! Congratulations!`);
-      return interaction.editReply('✅ Rerolled!');
-    } catch (err) {
-      return interaction.editReply('❌ Something went wrong.');
-    }
-  }
-}
 
   // ── /ping ──────────────────────────────────────────────────────
-  if (interaction.commandName === 'ping') {
-    return interaction.reply({ content: `🏓 ${client.ws.ping}ms`, flags: 64 });
-  }
+  if (interaction.commandName === 'ping') return interaction.reply({ content: `🏓 ${client.ws.ping}ms`, flags: 64 });
 
   // ── /servers ───────────────────────────────────────────────────
   if (interaction.commandName === 'servers') {
@@ -1995,11 +1632,10 @@ if (interaction.commandName === 'giveaway') {
     }
   }
 
-  // ── /invite ────────────────────────────────────────────────────
-  if (interaction.commandName === 'invite') { return interaction.reply({ content: `🚀 Invite me here:\n👉 https://discord.com/discovery/applications/1507762062359531580` }); }
-  if (interaction.commandName === 'portfolio') { return interaction.reply({ content: `🚀 See my Creators Portfolio here:\n👉 https://widoe-portfolio.vercel.app/` }); }
-  if (interaction.commandName === 'websites') { return interaction.reply({ content: `🚀 See my Creators Websites here:\n👉 https://widoe-portfolio.vercel.app/\nhttps://jarvisbot-rust.vercel.app/\nhttps://pokedex-bice-zeta-61.vercel.app/` }); }
-  if (interaction.commandName === 'dashboard') { return interaction.reply({ content: `⚙️ Change my settings here:\n👉 https://jarvisbot-rust.vercel.app/dashboard.html` }); }
+  if (interaction.commandName === 'invite') return interaction.reply({ content: `🚀 Invite me here:\n👉 https://discord.com/discovery/applications/1507762062359531580` });
+  if (interaction.commandName === 'portfolio') return interaction.reply({ content: `🚀 See my Creators Portfolio here:\n👉 https://widoe-portfolio.vercel.app/` });
+  if (interaction.commandName === 'websites') return interaction.reply({ content: `🚀 See my Creators Websites here:\n👉 https://widoe-portfolio.vercel.app/\nhttps://jarvisbot-rust.vercel.app/\nhttps://pokedex-bice-zeta-61.vercel.app/` });
+  if (interaction.commandName === 'dashboard') return interaction.reply({ content: `⚙️ Change my settings here:\n👉 https://jarvisbot-rust.vercel.app/dashboard.html` });
 
   // ── /weather ───────────────────────────────────────────────────
   if (interaction.commandName === 'weather') {
@@ -2012,7 +1648,7 @@ if (interaction.commandName === 'giveaway') {
       const weatherRes = await axios.get("https://api.open-meteo.com/v1/forecast", { params: { latitude, longitude, current_weather: true } });
       const weather = weatherRes.data.current_weather;
       return interaction.reply({ content: `🌤️ Weather in ${name}, ${country}\n🌡️ Temp: ${weather.temperature}°C\n💨 Wind: ${weather.windspeed} km/h` });
-    } catch (err) { console.error(err); return interaction.reply("❌ Failed to fetch weather data"); }
+    } catch (err) { return interaction.reply("❌ Failed to fetch weather data"); }
   }
 
   // ── /youtube ───────────────────────────────────────────────────
@@ -2049,37 +1685,49 @@ if (interaction.commandName === 'giveaway') {
       const stars = "⭐".repeat(rating) + "☆".repeat(5 - rating);
       await owner.send(`📩 **New Feedback**\n\n👤 User: ${interaction.user.tag}\n🌍 Server: ${interaction.guild?.name || "DM"}\n\n⭐ Rating: ${stars} (${rating}/5)\n\n💬 Message:\n${feedback}`);
       return interaction.reply({ content: "✅ Feedback sent! Thanks ❤️", flags: 64 });
-    } catch (err) { console.error(err); return interaction.reply({ content: "❌ Could not send feedback", flags: 64 }); }
+    } catch { return interaction.reply({ content: "❌ Could not send feedback", flags: 64 }); }
   }
 
+
+  // ── /setvoicechannel ───────────────────────────────────────────
   if (interaction.commandName === 'setvoicechannel') {
-     if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
-      if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need Manage Server permission.', flags: 64 });
-
-      // ⭐ PREMIUM GATE — Voice Assistant is a paid feature
-      if (!isGuildPremium(interaction.guild.id)) {
-        return interaction.reply({
-          content: '⭐ The **Voice Assistant** is a Premium feature. Upgrade once on the dashboard (https://jarvisbot-rust.vercel.app/dashboard.html) to let JARVIS join and listen in voice channels 24/7.',
-          flags: 64
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need Manage Server permission.', flags: 64 });
+    if (!(await isGuildPremium(interaction.guild.id))) {
+      return interaction.reply({
+        content: `⭐ The **Voice Assistant** is a Premium feature. Vote on top.gg to unlock it free for 30 days: https://top.gg/bot/${BOT_ID}/vote\n\nOr upgrade once on the dashboard: https://jarvisbot-rust.vercel.app/dashboard.html`,
+        flags: 64
+      });
+    }
+    const channel = interaction.options.getChannel('channel');
+    dashboardConfig.voiceChannels = dashboardConfig.voiceChannels || {};
+    dashboardConfig.voiceChannels[interaction.guild.id] = channel.id;
+    await saveDashboardConfig(dashboardConfig);
+    const voiceDeps = {
+      groq,
+      getReplyForVoice: async ({ guildId, transcript }) => {
+        const activeMode = getActiveMode(guildId);
+        const modeData = MODES[activeMode];
+        const res = await groq.chat.completions.create({
+          model: 'llama-3.1-8b-instant',
+          messages: [{ role: 'system', content: `You are JARVIS speaking out loud. ${modeData.prompt} Keep replies SHORT — 1-2 sentences. No emojis, no markdown — plain spoken text only.` }, { role: 'user', content: transcript }],
+          temperature: 0.85, max_tokens: 120,
         });
-      }
+        return res.choices[0].message.content;
+      },
+    };
+    await joinAndListen(client, interaction.guild, channel.id, voiceDeps);
+    return interaction.reply(`✅ JARVIS will now stay in <#${channel.id}> 24/7 and listen for voice chat.`);
+  }
 
-      const channel = interaction.options.getChannel('channel');
-      dashboardConfig.voiceChannels = dashboardConfig.voiceChannels || {};
-      dashboardConfig.voiceChannels[interaction.guild.id] = channel.id;
-      await saveDashboardConfig(dashboardConfig);
-      await joinAndListen(client, interaction.guild, channel.id, voiceDeps);
-      return interaction.reply(`✅ JARVIS will now stay in <#${channel.id}> 24/7 and listen for voice chat.`);
-    }
-
-    if (interaction.commandName === 'leavevoice') {
-      if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
-      if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need Manage Server permission.', flags: 64 });
-     delete dashboardConfig.voiceChannels?.[interaction.guild.id];
-     await saveDashboardConfig(dashboardConfig);
-      leaveVoice(interaction.guild.id);
-      return interaction.reply('👋 Left the voice channel.');
-    }
+  if (interaction.commandName === 'leavevoice') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need Manage Server permission.', flags: 64 });
+    delete dashboardConfig.voiceChannels?.[interaction.guild.id];
+    await saveDashboardConfig(dashboardConfig);
+    leaveVoice(interaction.guild.id);
+    return interaction.reply('👋 Left the voice channel.');
+  }
 
   // ── /reviews ───────────────────────────────────────────────────
   if (interaction.commandName === 'reviews') {
@@ -2089,11 +1737,12 @@ if (interaction.commandName === 'giveaway') {
       const avg = ratings.reduce((a, b) => a + b, 0) / ratings.length;
       const stars = "⭐".repeat(Math.round(avg)) + "☆".repeat(5 - Math.round(avg));
       const latest = feedbacks.slice(-3).reverse().map(f => `⭐ ${f.rating}/5 - **${f.user}**\n💬 ${f.message}`).join("\n\n");
-      const embed = new EmbedBuilder().setColor(0xffcc00).setTitle("📊 Bot Reviews").addFields({ name: "⭐ Average Rating", value: `${stars} (${avg.toFixed(1)}/5)` }, { name: "🧾 Total Reviews", value: `${ratings.length}` }, { name: "🗣️ Latest Feedback", value: latest || "No feedback yet" }).setFooter({ text: "JARVIS Feedback System" });
+      const embed = new EmbedBuilder().setColor(0xffcc00).setTitle("📊 Bot Reviews")
+        .addFields({ name: "⭐ Average Rating", value: `${stars} (${avg.toFixed(1)}/5)` }, { name: "🧾 Total Reviews", value: `${ratings.length}` }, { name: "🗣️ Latest Feedback", value: latest || "No feedback yet" })
+        .setFooter({ text: "JARVIS Feedback System" });
       return interaction.reply({ embeds: [embed] });
-    } catch (err) { console.error(err); return interaction.reply({ content: "❌ Failed to load reviews", flags: 64 }); }
+    } catch { return interaction.reply({ content: "❌ Failed to load reviews", flags: 64 }); }
   }
-
 
   // ── /help ──────────────────────────────────────────────────────
   if (interaction.commandName === 'help') {
@@ -2125,13 +1774,14 @@ if (interaction.commandName === 'giveaway') {
 /ticket [panel] - open a support ticket
 /closeticket - close this ticket
 /addtoticket - add a user to a ticket
-/setticketcategory - set ticket category
-/setuppanel [panel] - post a ticket panel embed
+/setuppanel [panel] - post ticket panel(s) with buttons
 /listpanels - list all configured panels
-/setupapplication [panel] - post an application panel embed
-/listapplications - list all configured application panels
+/setupapplication [panel] - post an application panel
+/listapplications - list all application panels
+/giveaway start/end/reroll - giveaways
+/vote - vote on top.gg for free Premium
 /feedback /reviews /invite /portfolio /websites /dashboard
-/broadcast
+/broadcast - owner: send message to all servers
 `)]
     });
   }
@@ -2184,18 +1834,13 @@ if (interaction.commandName === 'giveaway') {
   }
 
   // ── /ban ───────────────────────────────────────────────────────
-if (interaction.commandName === 'ban') {
-  if (!interaction.guild) return interaction.reply({ content: "❌ Server only", flags: 64 });
-  if (!interaction.member.permissions.has("BanMembers")) return interaction.reply({ content: "❌ no permission", flags: 64 });
-  const user = interaction.options.getUser('user');
-  try {
-    await interaction.guild.members.ban(user.id);
-    return interaction.reply(`🔨 banned ${user.tag}`);
-  } catch (err) {
-    console.error('[Ban] failed:', err.message);
-    return interaction.reply({ content: `❌ Could not ban that user: ${err.message}`, flags: 64 });
+  if (interaction.commandName === 'ban') {
+    if (!interaction.guild) return interaction.reply({ content: "❌ Server only", flags: 64 });
+    if (!interaction.member.permissions.has("BanMembers")) return interaction.reply({ content: "❌ no permission", flags: 64 });
+    const user = interaction.options.getUser('user');
+    try { await interaction.guild.members.ban(user.id); return interaction.reply(`🔨 banned ${user.tag}`); }
+    catch (err) { return interaction.reply({ content: `❌ Could not ban that user: ${err.message}`, flags: 64 }); }
   }
-}
 
   // ── /search ────────────────────────────────────────────────────
   if (interaction.commandName === 'search') {
@@ -2204,49 +1849,20 @@ if (interaction.commandName === 'ban') {
   }
 
   // ── /ask ───────────────────────────────────────────────────────
-if (interaction.commandName === 'ask') {
-  await interaction.deferReply();
-
-  const question = interaction.options.getString('question');
-  const jarvisTier = getJarvisTier(interaction.guild?.id);
-
-  if (
-    question.toLowerCase().includes('@everyone') ||
-    question.toLowerCase().includes('@here')
-  ) {
-    return interaction.editReply("nah not doing that 💀");
+  if (interaction.commandName === 'ask') {
+    await interaction.deferReply();
+    const question = interaction.options.getString('question');
+    const jarvisTier = await getJarvisTier(interaction.guild?.id);
+    if (question.toLowerCase().includes('@everyone') || question.toLowerCase().includes('@here')) return interaction.editReply("nah not doing that 💀");
+    try {
+      const res = await groq.chat.completions.create({
+        model: jarvisTier.model,
+        messages: [{ role: "system", content: "You are JARVIS, a smart and chill Discord bot." }, { role: "user", content: question }],
+        temperature: 0.8, max_tokens: jarvisTier.maxTokens
+      });
+      return interaction.editReply(res.choices[0].message.content);
+    } catch { return interaction.editReply("❌ My AI brain crashed for a second, try again."); }
   }
-
-  try {
-    const res = await groq.chat.completions.create({
-      model: jarvisTier.model,
-      messages: [
-        {
-          role: "system",
-          content: "You are JARVIS, a smart and chill Discord bot."
-        },
-        {
-          role: "user",
-          content: question
-        }
-      ],
-      temperature: 0.8,
-      max_tokens: jarvisTier.maxTokens
-    });
-
-    const answer = res.choices[0].message.content;
-
-    return interaction.editReply(answer);
-
-  } catch (err) {
-    console.error('[ASK] failed:', err);
-
-    return interaction.editReply(
-      "❌ My AI brain crashed for a second, try again."
-    );
-  }
-}
-
 
   // ── /roast ─────────────────────────────────────────────────────
   if (interaction.commandName === 'roast') {
@@ -2258,7 +1874,7 @@ if (interaction.commandName === 'ask') {
     try {
       const res = await groq.chat.completions.create({ model: 'llama-3.1-8b-instant', messages: [{ role: 'system', content: 'You are a comedy roast master. Write a short, funny, witty roast. Keep it light — think comedy roast not bullying. 2-3 sentences max. No emojis.' }, { role: 'user', content: `Roast a Discord user named "${subject}". The roast was requested by "${interaction.user.username}".` }], temperature: 1.0, max_tokens: 150 });
       return interaction.editReply(`🔥 **${target.username}**, ${res.choices[0].message.content}`);
-    } catch (err) { console.error(err); return interaction.editReply('❌ roast machine broke rq'); }
+    } catch { return interaction.editReply('❌ roast machine broke rq'); }
   }
 
   // ── /clearwarnings ─────────────────────────────────────────────
@@ -2282,11 +1898,9 @@ if (interaction.commandName === 'ask') {
     try {
       await interaction.guild.members.kick(target.id, reason);
       await pushLogEvent(interaction.guild.id, { type: 'kick', userId: target.id, username: target.tag, detail: `Kicked by ${interaction.user.tag} — ${reason}` });
-      if (isLogEventEnabled(interaction.guild.id, 'kick')) {
-        await sendLog(interaction.guild.id, new EmbedBuilder().setColor(LOG_COLORS.kick).setTitle('👢 Member Kicked').addFields({ name: 'User', value: target.tag, inline: true }, { name: 'Moderator', value: interaction.user.tag, inline: true }, { name: 'Reason', value: reason }).setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` }).setTimestamp());
-      }
+      if (isLogEventEnabled(interaction.guild.id, 'kick')) await sendLog(interaction.guild.id, new EmbedBuilder().setColor(LOG_COLORS.kick).setTitle('👢 Member Kicked').addFields({ name: 'User', value: target.tag, inline: true }, { name: 'Moderator', value: interaction.user.tag, inline: true }, { name: 'Reason', value: reason }).setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` }).setTimestamp());
       return interaction.reply(`👢 **${target.username}** has been kicked. Reason: ${reason}`);
-    } catch (err) { console.error(err); return interaction.reply({ content: '❌ Could not kick that user.', flags: 64 }); }
+    } catch { return interaction.reply({ content: '❌ Could not kick that user.', flags: 64 }); }
   }
 
   // ── /timeout ───────────────────────────────────────────────────
@@ -2300,11 +1914,9 @@ if (interaction.commandName === 'ask') {
       const member = await interaction.guild.members.fetch(target.id);
       await member.timeout(minutes * 60 * 1000, reason);
       await pushLogEvent(interaction.guild.id, { type: 'timeout', userId: target.id, username: target.tag, detail: `Timed out ${minutes}m by ${interaction.user.tag} — ${reason}` });
-      if (isLogEventEnabled(interaction.guild.id, 'timeout')) {
-        await sendLog(interaction.guild.id, new EmbedBuilder().setColor(LOG_COLORS.timeout).setTitle('🔇 Member Timed Out').addFields({ name: 'User', value: target.tag, inline: true }, { name: 'Duration', value: `${minutes} minute(s)`, inline: true }, { name: 'Moderator', value: interaction.user.tag, inline: true }, { name: 'Reason', value: reason }).setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` }).setTimestamp());
-      }
+      if (isLogEventEnabled(interaction.guild.id, 'timeout')) await sendLog(interaction.guild.id, new EmbedBuilder().setColor(LOG_COLORS.timeout).setTitle('🔇 Member Timed Out').addFields({ name: 'User', value: target.tag, inline: true }, { name: 'Duration', value: `${minutes} minute(s)`, inline: true }, { name: 'Moderator', value: interaction.user.tag, inline: true }, { name: 'Reason', value: reason }).setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` }).setTimestamp());
       return interaction.reply(`🔇 **${target.username}** timed out for **${minutes} minute(s)**. Reason: ${reason}`);
-    } catch (err) { console.error(err); return interaction.reply({ content: '❌ Could not timeout that user.', flags: 64 }); }
+    } catch { return interaction.reply({ content: '❌ Could not timeout that user.', flags: 64 }); }
   }
 
   // ── /leaderboard ───────────────────────────────────────────────
@@ -2319,7 +1931,7 @@ if (interaction.commandName === 'ask') {
         catch { return `${i + 1}. Unknown — ${entry.score} point(s)`; }
       }));
       return interaction.reply({ embeds: [new EmbedBuilder().setColor(0xffd700).setTitle('🏆 Trivia Leaderboard').setDescription(lines.join('\n')).setFooter({ text: 'Answer trivia questions to earn points!' })] });
-    } catch (err) { console.error(err); return interaction.reply({ content: '❌ Could not load leaderboard.', flags: 64 }); }
+    } catch { return interaction.reply({ content: '❌ Could not load leaderboard.', flags: 64 }); }
   }
 
   // ── /8ball ─────────────────────────────────────────────────────
@@ -2338,15 +1950,9 @@ if (interaction.commandName === 'ask') {
       const res = await axios.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 8000 });
       const text = res.data.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '').replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 3000);
       if (!text) return interaction.editReply('❌ Could not extract text from that page.');
-      const ai = await groq.chat.completions.create({ model: 'llama-3.1-8b-instant', messages: [{ role: 'system', content: 'Summarize the following webpage content clearly and concisely in a few bullet points. Always mention the author, creator, or owner of the website if found anywhere in the content. No fluff.' }, { role: 'user', content: `URL: ${url}\n\nContent:\n${text}` }], max_tokens: 400 });
-      const summary = ai.choices[0].message.content;
-      const key = `${interaction.guild?.id || 'dm'}-${interaction.channelId}`;
-      if (!memory[key]) memory[key] = { messages: [] };
-      memory[key].messages.push({ role: 'user', content: `${interaction.user.username}: browsed ${url}` }, { role: 'assistant', content: summary });
-      if (memory[key].messages.length > 20) memory[key].messages.splice(0, 2);
-      saveMemory(memory);
-      return interaction.editReply(`🌐 **${url}**\n\n${summary}`);
-    } catch (err) { console.error(err); return interaction.editReply('❌ Could not access that website. It might be blocked or down.'); }
+      const ai = await groq.chat.completions.create({ model: 'llama-3.1-8b-instant', messages: [{ role: 'system', content: 'Summarize the following webpage content clearly and concisely in a few bullet points. Always mention the author, creator, or owner of the website if found. No fluff.' }, { role: 'user', content: `URL: ${url}\n\nContent:\n${text}` }], max_tokens: 400 });
+      return interaction.editReply(`🌐 **${url}**\n\n${ai.choices[0].message.content}`);
+    } catch { return interaction.editReply('❌ Could not access that website. It might be blocked or down.'); }
   }
 
   // ── /wouldyourather ────────────────────────────────────────────
@@ -2355,7 +1961,7 @@ if (interaction.commandName === 'ask') {
     try {
       const res = await groq.chat.completions.create({ model: 'llama-3.1-8b-instant', messages: [{ role: 'system', content: 'Generate a fun and creative "would you rather" question with two wild options. Format exactly like:\nWould you rather...\n🅰️ Option 1\n🅱️ Option 2' }, { role: 'user', content: 'Give me a would you rather question.' }], temperature: 1.0, max_tokens: 100 });
       return interaction.editReply(res.choices[0].message.content);
-    } catch (err) { console.error(err); return interaction.editReply('❌ failed rq'); }
+    } catch { return interaction.editReply('❌ failed rq'); }
   }
 
   // ── /warn ──────────────────────────────────────────────────────
@@ -2369,9 +1975,7 @@ if (interaction.commandName === 'ask') {
     memory[key].push({ reason, by: interaction.user.username, time: Date.now() });
     saveMemory(memory);
     await pushLogEvent(interaction.guild.id, { type: 'warn', userId: target.id, username: target.tag, detail: `Warned by ${interaction.user.tag} — ${reason}` });
-    if (isLogEventEnabled(interaction.guild.id, 'warn')) {
-      await sendLog(interaction.guild.id, new EmbedBuilder().setColor(LOG_COLORS.warn).setTitle('⚠️ Member Warned').addFields({ name: 'User', value: target.tag, inline: true }, { name: 'Moderator', value: interaction.user.tag, inline: true }, { name: 'Total Warnings', value: `${memory[key].length}`, inline: true }, { name: 'Reason', value: reason }).setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` }).setTimestamp());
-    }
+    if (isLogEventEnabled(interaction.guild.id, 'warn')) await sendLog(interaction.guild.id, new EmbedBuilder().setColor(LOG_COLORS.warn).setTitle('⚠️ Member Warned').addFields({ name: 'User', value: target.tag, inline: true }, { name: 'Moderator', value: interaction.user.tag, inline: true }, { name: 'Total Warnings', value: `${memory[key].length}`, inline: true }, { name: 'Reason', value: reason }).setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` }).setTimestamp());
     try { await target.send(`⚠️ You were warned in **${interaction.guild.name}**\nReason: ${reason}`); } catch {}
     return interaction.reply(`⚠️ **${target.username}** has been warned. Total warnings: **${memory[key].length}**`);
   }
@@ -2397,7 +2001,7 @@ if (interaction.commandName === 'ask') {
       if (!articles || articles.length === 0) return interaction.editReply('❌ No news found.');
       const formatted = articles.map(a => `**${a.title}**\n🔗 ${a.url}`).join('\n\n');
       return interaction.editReply(`📰 **News: ${topic}**\n\n${formatted}`);
-    } catch (err) { console.error(err); return interaction.editReply('❌ Could not fetch news.'); }
+    } catch { return interaction.editReply('❌ Could not fetch news.'); }
   }
 
   // ── /define ────────────────────────────────────────────────────
@@ -2429,7 +2033,7 @@ if (interaction.commandName === 'ask') {
       await saveMemory(memory);
       const row = new ActionRowBuilder().addComponents(['A', 'B', 'C', 'D'].map(letter => new ButtonBuilder().setCustomId(`trivia_${letter}`).setLabel(`${letter}) ${options[letter]}`.slice(0, 80)).setStyle(ButtonStyle.Primary)));
       return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('🧠 Trivia Time!').setDescription(question).setFooter({ text: 'Click a button below to answer!' })], components: [row] });
-    } catch (err) { console.error(err); return interaction.editReply('❌ Failed to generate trivia question.'); }
+    } catch { return interaction.editReply('❌ Failed to generate trivia question.'); }
   }
 
   // ── /setlogchannel ─────────────────────────────────────────────
@@ -2440,7 +2044,7 @@ if (interaction.commandName === 'ask') {
     dashboardConfig.logChannels = dashboardConfig.logChannels || {};
     dashboardConfig.logChannels[interaction.guild.id] = channel.id;
     await saveDashboardConfig(dashboardConfig);
-    return interaction.reply({ embeds: [new EmbedBuilder().setColor(0x57f287).setTitle('✅ Log Channel Set').setDescription(`JARVIS will now send server logs to <#${channel.id}>.`).addFields({ name: 'Events logged', value: 'Member join/leave • Message delete/edit • Bans/unbans • Kicks • Timeouts • Channel create/delete • Role create/delete • Nickname changes • Voice activity • Warnings • AutoMod actions' }).setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` }).setTimestamp()] });
+    return interaction.reply({ embeds: [new EmbedBuilder().setColor(0x57f287).setTitle('✅ Log Channel Set').setDescription(`JARVIS will now send server logs to <#${channel.id}>.`).setFooter({ text: `JARVIS Logs • ${interaction.guild.name}` }).setTimestamp()] });
   }
 
   // ── /disablelogs ───────────────────────────────────────────────
@@ -2459,11 +2063,11 @@ if (interaction.commandName === 'ask') {
       const existing = await redis.get(key);
       const logs = Array.isArray(existing) ? existing : (existing ? JSON.parse(existing) : []);
       if (logs.length === 0) return interaction.reply({ content: '📭 No log events recorded yet.', flags: 64 });
-      const typeEmoji = { join: '📥', leave: '📤', ban: '🔨', unban: '✅', kick: '👢', timeout: '🔇', messageDelete: '🗑️', messageEdit: '✏️', channelCreate: '📢', channelDelete: '🗑️', roleCreate: '🎭', roleDelete: '🗑️', voiceJoin: '🔊', voiceLeave: '🔇', voiceMove: '🔀', warn: '⚠️', nickChange: '📝', automod: '🛡️', ticketOpen: '🎫', ticketClose: '🔒', applicationSubmit: '📋', applicationDecision: '🗳️' };
+      const typeEmoji = { join: '📥', leave: '📤', ban: '🔨', unban: '✅', kick: '👢', timeout: '🔇', messageDelete: '🗑️', messageEdit: '✏️', channelCreate: '📢', channelDelete: '🗑️', roleCreate: '🎭', roleDelete: '🗑️', voiceJoin: '🔊', voiceLeave: '🔇', voiceMove: '🔀', warn: '⚠️', nickChange: '📝', automod: '🛡️', ticketOpen: '🎫', ticketClose: '🔒', applicationSubmit: '📋', applicationDecision: '🗳️', votePremium: '⭐' };
       const recent = logs.slice(-10).reverse();
       const lines = recent.map(e => { const emoji = typeEmoji[e.type] || '📋'; const time = `<t:${Math.floor(e.timestamp / 1000)}:R>`; const user = e.username ? `**${e.username}**` : ''; return `${emoji} ${time} ${user} — ${e.detail || e.type}`; });
       return interaction.reply({ embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('📋 Recent Server Events').setDescription(lines.join('\n')).setFooter({ text: `Last ${recent.length} events • JARVIS Logs` }).setTimestamp()], flags: 64 });
-    } catch (err) { console.error(err); return interaction.reply({ content: '❌ Could not load logs.', flags: 64 }); }
+    } catch { return interaction.reply({ content: '❌ Could not load logs.', flags: 64 }); }
   }
 
   // ── /automod ───────────────────────────────────────────────────
@@ -2497,7 +2101,7 @@ if (interaction.commandName === 'ask') {
       const encoded = encodeURIComponent(prompt);
       const imageUrl = `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=1024&nologo=true&seed=${Math.floor(Math.random() * 99999)}`;
       return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x9b59b6).setTitle('🎨 Image Generated').setDescription(`**Prompt:** ${prompt}`).setImage(imageUrl).setFooter({ text: 'JARVIS AI • Powered by Pollinations.ai' })] });
-    } catch (err) { console.error(err); return interaction.editReply('❌ Failed to generate image rq, try again'); }
+    } catch { return interaction.editReply('❌ Failed to generate image rq, try again'); }
   }
 
   // ── /setticketcategory ─────────────────────────────────────────
@@ -2553,7 +2157,7 @@ if (interaction.commandName === 'ask') {
     try {
       await interaction.channel.permissionOverwrites.create(target.id, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true });
       return interaction.reply(`✅ Added <@${target.id}> to this ticket.`);
-    } catch (err) { console.error(err); return interaction.reply({ content: '❌ Failed to add user.', flags: 64 }); }
+    } catch { return interaction.reply({ content: '❌ Failed to add user.', flags: 64 }); }
   }
 
   // ── /listpanels ────────────────────────────────────────────────
@@ -2561,56 +2165,65 @@ if (interaction.commandName === 'ask') {
     if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
     const panelList = getPanelList(interaction.guild.id);
     if (panelList.length === 0) return interaction.reply({ content: '❌ No panels configured. Use the dashboard to create panels first.', flags: 64 });
-    const lines = panelList.map(p => `• **${p.title || p.id}** — ID: \`${p.id}\`\n  Post with: \`/setuppanel panel:${p.id}\``).join('\n\n');
-    return interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setColor(0x5865f2)
-        .setTitle('🎫 Ticket Panels')
-        .setDescription(lines)
-        .setFooter({ text: `${panelList.length} panel(s) configured • JARVIS Tickets` })
-        .setTimestamp()
-      ],
-      flags: 64
-    });
+    const lines = panelList.map(p => {
+      const roleInfo = p.supportRoleId ? `\n  Support role: <@&${p.supportRoleId}>` : '';
+      return `• **${p.title || p.id}** — ID: \`${p.id}\`${roleInfo}\n  Post with: \`/setuppanel panel:${p.id}\``;
+    }).join('\n\n');
+    return interaction.reply({ embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('🎫 Ticket Panels').setDescription(lines).setFooter({ text: `${panelList.length} panel(s) configured • JARVIS Tickets` }).setTimestamp()], flags: 64 });
   }
 
-  // ── /setuppanel (multi-panel) ─────────────────────────────────
+  // ── /setuppanel ────────────────────────────────────────────────
   if (interaction.commandName === 'setuppanel') {
     if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
     if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
 
-    const panelId = interaction.options.getString('panel');
+    const panelIdArg = interaction.options.getString('panel');
+    const panelList = getPanelList(interaction.guild.id);
 
-    // No panel specified — show list of available panels
-    if (!panelId) {
-      const panelList = getPanelList(interaction.guild.id);
-      const lines = panelList.map(p => `• **${p.title || p.id}** — \`/setuppanel panel:${p.id}\``).join('\n');
-      return interaction.reply({
-        content: `🎫 **Available panels:**\n${lines}\n\nRun one of the commands above to post that panel here.`,
-        flags: 64
-      });
+    if (panelList.length === 0) return interaction.reply({ content: '❌ No panels configured. Create them in the dashboard first.', flags: 64 });
+
+    // Specific panel requested — post just that one
+    if (panelIdArg) {
+      const panel = getPanel(interaction.guild.id, panelIdArg);
+      const color = parseInt((panel.color || '#5865f2').replace(/^#/, ''), 16) || 0x5865f2;
+      const embed = new EmbedBuilder()
+        .setColor(color)
+        .setTitle(panel.title || '🎫 Support Tickets')
+        .setDescription(panel.description || 'Click the button below to open a support ticket.')
+        .setFooter({ text: `${interaction.guild.name} • ${panel.id} Support` })
+        .setTimestamp();
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`panel_create_ticket__${panel.id}`).setLabel(panel.buttonLabel || '🎫 Create Ticket').setStyle(ButtonStyle.Primary)
+      );
+      await interaction.channel.send({ embeds: [embed], components: [row] });
+      return interaction.reply({ content: `✅ **${panel.title || panel.id}** panel posted!`, flags: 64 });
     }
 
-    const panel = getPanel(interaction.guild.id, panelId);
-    const color = parseInt((panel.color || '#5865f2').replace(/^#/, ''), 16) || 0x5865f2;
+    // No specific panel — post ONE embed with ALL panels as multi-buttons (max 5 per row)
+    const visiblePanels = panelList.slice(0, 5);
+    const descLines = visiblePanels.map(p => `**${p.buttonLabel || p.title || p.id}** — ${p.description || 'Open a ticket'}`);
 
     const embed = new EmbedBuilder()
-      .setColor(color)
-      .setTitle(panel.title || '🎫 Support Tickets')
-      .setDescription(panel.description || 'Need help? Click the button below to open a support ticket and our team will assist you.')
-      .setFooter({ text: `${interaction.guild.name} • ${panel.id} Support` })
+      .setColor(0x5865f2)
+      .setTitle('🎫 Support Tickets')
+      .setDescription(descLines.join('\n\n'))
+      .setFooter({ text: `${interaction.guild.name} • Ticket System` })
       .setTimestamp();
 
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        // Include panelId in customId so the right panel is used when button is clicked
-        .setCustomId(`panel_create_ticket__${panel.id}`)
-        .setLabel(panel.buttonLabel || '🎫 Create Ticket')
-        .setStyle(ButtonStyle.Primary)
+      visiblePanels.map(p =>
+        new ButtonBuilder()
+          .setCustomId(`panel_create_ticket__${p.id}`)
+          .setLabel(p.buttonLabel || p.title || p.id)
+          .setStyle(ButtonStyle.Primary)
+      )
     );
 
     await interaction.channel.send({ embeds: [embed], components: [row] });
-    return interaction.reply({ content: `✅ **${panel.title || panel.id}** panel posted!`, flags: 64 });
+    return interaction.reply({
+      content: `✅ Posted combined panel embed with **${visiblePanels.length}** button(s).${panelList.length > 5 ? '\n⚠️ Only the first 5 panels shown (Discord limit). Use `/setuppanel panel:<id>` to post the rest individually.' : ''}`,
+      flags: 64,
+    });
   }
 
   // ── /listapplications ──────────────────────────────────────────
@@ -2622,399 +2235,229 @@ if (interaction.commandName === 'ask') {
       const dest = p.submitChannelId ? `<#${p.submitChannelId}>` : '⚠️ not set';
       return `• **${p.name || p.title || p.id}** — ID: \`${p.id}\`\n  Submits to: ${dest}\n  Post with: \`/setupapplication panel:${p.id}\``;
     }).join('\n\n');
-    return interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setColor(0x5865f2)
-        .setTitle('📋 Application Panels')
-        .setDescription(lines)
-        .setFooter({ text: `${panelList.length} panel(s) configured • JARVIS Applications` })
-        .setTimestamp()
-      ],
-      flags: 64
-    });
+    return interaction.reply({ embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('📋 Application Panels').setDescription(lines).setFooter({ text: `${panelList.length} panel(s) configured • JARVIS Applications` }).setTimestamp()], flags: 64 });
   }
 
-  // ── /setupapplication ───────────────────────────────────────────
+  // ── /setupapplication ──────────────────────────────────────────
   if (interaction.commandName === 'setupapplication') {
     if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
     if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
-
     const panelId = interaction.options.getString('panel');
-
     if (!panelId) {
       const panelList = getApplicationPanelList(interaction.guild.id);
-      if (panelList.length === 0) {
-        return interaction.reply({ content: '❌ No application panels configured yet. Create one in the dashboard first.', flags: 64 });
-      }
+      if (panelList.length === 0) return interaction.reply({ content: '❌ No application panels configured yet. Create one in the dashboard first.', flags: 64 });
       const lines = panelList.map(p => `• **${p.name || p.title || p.id}** — \`/setupapplication panel:${p.id}\``).join('\n');
-      return interaction.reply({
-        content: `📋 **Available application panels:**\n${lines}\n\nRun one of the commands above to post that panel here.`,
-        flags: 64
-      });
+      return interaction.reply({ content: `📋 **Available application panels:**\n${lines}`, flags: 64 });
     }
-
     const panel = getApplicationPanel(interaction.guild.id, panelId);
-
-    if (!panel.submitChannelId) {
-      return interaction.reply({ content: `⚠️ This panel has no submission channel set yet. Configure it in the dashboard before posting it.`, flags: 64 });
-    }
-
+    if (!panel.submitChannelId) return interaction.reply({ content: `⚠️ This panel has no submission channel set yet. Configure it in the dashboard before posting it.`, flags: 64 });
     const color = parseInt((panel.color || '#5865f2').replace(/^#/, ''), 16) || 0x5865f2;
-
     const embed = new EmbedBuilder()
-      .setColor(color)
-      .setTitle(panel.title || '📋 Apply Now')
+      .setColor(color).setTitle(panel.title || '📋 Apply Now')
       .setDescription(panel.description || 'Click the button below to fill out an application.')
-      .setFooter({ text: `${interaction.guild.name} • ${panel.name || panel.id} Applications` })
-      .setTimestamp();
-
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`app_create__${panel.id}`)
-        .setLabel(panel.buttonLabel || '📋 Apply')
-        .setStyle(ButtonStyle.Primary)
-    );
-
+      .setFooter({ text: `${interaction.guild.name} • ${panel.name || panel.id} Applications` }).setTimestamp();
+    const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`app_create__${panel.id}`).setLabel(panel.buttonLabel || '📋 Apply').setStyle(ButtonStyle.Primary));
     await interaction.channel.send({ embeds: [embed], components: [row] });
     return interaction.reply({ content: `✅ **${panel.name || panel.title || panel.id}** application panel posted!`, flags: 64 });
   }
 
   // ── /setbroadcastchannel ───────────────────────────────────────
-if (interaction.commandName === 'setbroadcastchannel') {
-  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
-  if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
-  const channel = interaction.options.getChannel('channel');
-  dashboardConfig.broadcastChannels = dashboardConfig.broadcastChannels || {};
-  dashboardConfig.broadcastChannels[interaction.guild.id] = channel.id;
-  await saveDashboardConfig(dashboardConfig);
-  return interaction.reply({ content: `✅ Broadcast channel set to <#${channel.id}>. Owner announcements will appear there.`});
-}
+  if (interaction.commandName === 'setbroadcastchannel') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
+    const channel = interaction.options.getChannel('channel');
+    dashboardConfig.broadcastChannels = dashboardConfig.broadcastChannels || {};
+    dashboardConfig.broadcastChannels[interaction.guild.id] = channel.id;
+    await saveDashboardConfig(dashboardConfig);
+    return interaction.reply({ content: `✅ Broadcast channel set to <#${channel.id}>. Owner announcements will appear there.` });
+  }
 
-// ── /broadcast ─────────────────────────────────────────────────
-if (interaction.commandName === 'broadcast') {
-  if (!isOwner(interaction.user.id)) return interaction.reply({ content: '❌ Owner only.', flags: 64 });
+  // ── /broadcast ─────────────────────────────────────────────────
+  if (interaction.commandName === 'broadcast') {
+    if (!isOwner(interaction.user.id)) return interaction.reply({ content: '❌ Owner only.', flags: 64 });
+    await interaction.deferReply({});
+    const msg = interaction.options.getString('message');
+    const guilds = await client.guilds.fetch();
+    let sent = 0, failed = 0, noChannel = 0;
+    const embed = new EmbedBuilder().setColor(0x5865f2).setTitle('📢 Message from JARVIS Owner').setDescription(msg).setFooter({ text: `Sent by ${OWNER_NAME} • JARVIS` }).setTimestamp();
+    for (const [, oauthGuild] of guilds) {
+      try {
+        const guild = await client.guilds.fetch(oauthGuild.id);
+        const configuredId = dashboardConfig.broadcastChannels?.[guild.id];
+        let channel = null;
+        if (configuredId) { try { channel = await client.channels.fetch(configuredId); } catch {} }
+        if (!channel) { channel = (guild.systemChannel?.permissionsFor(guild.members.me)?.has('SendMessages') ? guild.systemChannel : null) || guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(guild.members.me)?.has('SendMessages')); }
+        if (!channel) { noChannel++; continue; }
+        await channel.send({ embeds: [embed] });
+        sent++;
+      } catch (err) { console.error(`[Broadcast] Failed for guild ${oauthGuild.id}:`, err.message); failed++; }
+    }
+    return interaction.editReply(`📢 Broadcast complete!\n✅ Sent: **${sent}**\n❌ Failed: **${failed}**\n⚠️ No channel found: **${noChannel}**`);
+  }
 
-  await interaction.deferReply({});
-
-  const msg = interaction.options.getString('message');
-  const guilds = await client.guilds.fetch();
-  let sent = 0, failed = 0, noChannel = 0;
-
-  const embed = new EmbedBuilder()
-    .setColor(0x5865f2)
-    .setTitle('📢 Message from JARVIS Owner')
-    .setDescription(msg)
-    .setFooter({ text: `Sent by ${OWNER_NAME} • JARVIS` })
-    .setTimestamp();
-
-  for (const [, oauthGuild] of guilds) {
-    try {
-      const guild = await client.guilds.fetch(oauthGuild.id);
-
-      // 1. Use server's configured broadcast channel
-      // 2. Fallback: system channel
-      // 3. Fallback: first sendable text channel
-      const configuredId = dashboardConfig.broadcastChannels?.[guild.id];
-      let channel = null;
-
-      if (configuredId) {
-        try { channel = await client.channels.fetch(configuredId); } catch {}
-      }
-
-      if (!channel) {
-        channel = (guild.systemChannel?.permissionsFor(guild.members.me)?.has('SendMessages')
-          ? guild.systemChannel : null) ||
-          guild.channels.cache.find(
-            c => c.isTextBased() && c.permissionsFor(guild.members.me)?.has('SendMessages')
-          );
-      }
-
-      if (!channel) { noChannel++; continue; }
-
-      await channel.send({ embeds: [embed] });
-      sent++;
-    } catch (err) {
-      console.error(`[Broadcast] Failed for guild ${oauthGuild.id}:`, err.message);
-      failed++;
+  // ── /setnotify ─────────────────────────────────────────────────
+  if (interaction.commandName === 'setnotify') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    if (!interaction.member.permissions.has('ManageGuild')) return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
+    const sub = interaction.options.getSubcommand();
+    dashboardConfig.socialNotifications = dashboardConfig.socialNotifications || {};
+    dashboardConfig.socialNotifications[interaction.guild.id] = dashboardConfig.socialNotifications[interaction.guild.id] || {};
+    const gc = dashboardConfig.socialNotifications[interaction.guild.id];
+    if (sub === 'youtube') {
+      const ytId = interaction.options.getString('channelid');
+      const channel = interaction.options.getChannel('channel');
+      const pingRole = interaction.options.getRole('pingrole');
+      gc.youtube = gc.youtube || { channels: [], channelId: null, pingRoleId: null };
+      if (!gc.youtube.channels.includes(ytId)) gc.youtube.channels.push(ytId);
+      gc.youtube.channelId = channel.id;
+      if (pingRole) gc.youtube.pingRoleId = pingRole.id;
+      await saveDashboardConfig(dashboardConfig);
+      return interaction.reply(`✅ Now watching YouTube channel \`${ytId}\`. Alerts → <#${channel.id}>${pingRole ? ` • Ping: <@&${pingRole.id}>` : ''}`);
+    }
+    if (sub === 'twitch') {
+      const username = interaction.options.getString('username').toLowerCase();
+      const channel = interaction.options.getChannel('channel');
+      const pingRole = interaction.options.getRole('pingrole');
+      gc.twitch = gc.twitch || { streamers: [], channelId: null, pingRoleId: null };
+      if (!gc.twitch.streamers.includes(username)) gc.twitch.streamers.push(username);
+      gc.twitch.channelId = channel.id;
+      if (pingRole) gc.twitch.pingRoleId = pingRole.id;
+      await saveDashboardConfig(dashboardConfig);
+      return interaction.reply(`✅ Now watching Twitch streamer **${username}**. Alerts → <#${channel.id}>${pingRole ? ` • Ping: <@&${pingRole.id}>` : ''}`);
+    }
+    if (sub === 'remove') {
+      const platform = interaction.options.getString('platform');
+      const target = interaction.options.getString('username').toLowerCase();
+      const gc2 = dashboardConfig.socialNotifications?.[interaction.guild.id];
+      if (!gc2) return interaction.reply({ content: '❌ No notifications configured.', flags: 64 });
+      if (platform === 'youtube' && gc2.youtube?.channels) gc2.youtube.channels = gc2.youtube.channels.filter(c => c !== target);
+      else if (platform === 'twitch' && gc2.twitch?.streamers) gc2.twitch.streamers = gc2.twitch.streamers.filter(s => s !== target);
+      await saveDashboardConfig(dashboardConfig);
+      return interaction.reply(`✅ Removed \`${target}\` from ${platform} tracking.`);
+    }
+    if (sub === 'list') {
+      const gc3 = dashboardConfig.socialNotifications?.[interaction.guild.id] || {};
+      const ytList = gc3.youtube?.channels?.map(c => `\`${c}\``).join(', ') || 'None';
+      const ttList = gc3.twitch?.streamers?.map(s => `**${s}**`).join(', ') || 'None';
+      const embed = new EmbedBuilder().setColor(0x00c8ff).setTitle('📡 Social Notifications')
+        .addFields(
+          { name: '🔴 YouTube', value: `Channels: ${ytList}\nAlerts: ${gc3.youtube?.channelId ? `<#${gc3.youtube.channelId}>` : 'Not set'}\nPing: ${gc3.youtube?.pingRoleId ? `<@&${gc3.youtube.pingRoleId}>` : 'None'}` },
+          { name: '🟣 Twitch', value: `Streamers: ${ttList}\nAlerts: ${gc3.twitch?.channelId ? `<#${gc3.twitch.channelId}>` : 'Not set'}\nPing: ${gc3.twitch?.pingRoleId ? `<@&${gc3.twitch.pingRoleId}>` : 'None'}` }
+        )
+        .setFooter({ text: 'JARVIS • Social Notifications' }).setTimestamp();
+      return interaction.reply({ embeds: [embed], flags: 64 });
     }
   }
 
-  return interaction.editReply(
-    `📢 Broadcast complete!\n✅ Sent: **${sent}**\n❌ Failed: **${failed}**\n⚠️ No channel found: **${noChannel}**`
-  );
-}
+  // ── Games ──────────────────────────────────────────────────────
+  if (interaction.commandName === 'rps') {
+    const choices = ['rock', 'paper', 'scissors'];
+    const emojis = { rock: '🪨', paper: '📄', scissors: '✂️' };
+    const player = interaction.options.getString('choice');
+    const jarvis = choices[Math.floor(Math.random() * choices.length)];
+    let result;
+    if (player === jarvis) result = "🤝 It's a tie!";
+    else if ((player === 'rock' && jarvis === 'scissors') || (player === 'paper' && jarvis === 'rock') || (player === 'scissors' && jarvis === 'paper')) result = '🎉 You win!';
+    else result = '😈 JARVIS wins!';
+    return interaction.reply(`${emojis[player]} You chose **${player}** — JARVIS chose ${emojis[jarvis]} **${jarvis}**\n${result}`);
+  }
 
-if (interaction.commandName === 'setnotify') {
-  if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
-  if (!interaction.member.permissions.has('ManageGuild'))
-    return interaction.reply({ content: '❌ You need **Manage Server** permission.', flags: 64 });
- 
-  const sub = interaction.options.getSubcommand();
- 
-  // Ensure nested config exists
-  dashboardConfig.socialNotifications = dashboardConfig.socialNotifications || {};
-  dashboardConfig.socialNotifications[interaction.guild.id] =
-    dashboardConfig.socialNotifications[interaction.guild.id] || {};
-  const gc = dashboardConfig.socialNotifications[interaction.guild.id];
- 
-  if (sub === 'youtube') {
-    const ytId     = interaction.options.getString('channelid');
-    const channel  = interaction.options.getChannel('channel');
-    const pingRole = interaction.options.getRole('pingrole');
-    gc.youtube = gc.youtube || { channels: [], channelId: null, pingRoleId: null };
-    if (!gc.youtube.channels.includes(ytId)) gc.youtube.channels.push(ytId);
-    gc.youtube.channelId  = channel.id;
-    if (pingRole) gc.youtube.pingRoleId = pingRole.id;
-    await saveDashboardConfig(dashboardConfig);
-    return interaction.reply(`✅ Now watching YouTube channel \`${ytId}\`. Alerts → <#${channel.id}>${pingRole ? ` • Ping: <@&${pingRole.id}>` : ''}`);
+  if (interaction.commandName === 'hangman') {
+    const words = ['javascript', 'discord', 'penguin', 'galaxy', 'keyboard', 'thunder', 'python', 'elephant', 'volcano', 'pyramid', 'asteroid', 'diamond', 'fortress', 'champion', 'labyrinth', 'paradox', 'quantum'];
+    const word = words[Math.floor(Math.random() * words.length)];
+    const gameKey = `hangman-${interaction.user.id}`;
+    memory[gameKey] = { word, guessed: [], wrong: 0, maxWrong: 6 };
+    await saveMemory(memory);
+    const display = word.split('').map(() => '_ ').join('');
+    return interaction.reply(`🎮 **Hangman started!**\n\n😀 \`${display}\`\n\nGuess with \`/guess letter:a\`\nWord has **${word.length}** letters.`);
   }
- 
-  if (sub === 'twitch') {
-    const username = interaction.options.getString('username').toLowerCase();
-    const channel  = interaction.options.getChannel('channel');
-    const pingRole = interaction.options.getRole('pingrole');
-    gc.twitch = gc.twitch || { streamers: [], channelId: null, pingRoleId: null };
-    if (!gc.twitch.streamers.includes(username)) gc.twitch.streamers.push(username);
-    gc.twitch.channelId  = channel.id;
-    if (pingRole) gc.twitch.pingRoleId = pingRole.id;
-    await saveDashboardConfig(dashboardConfig);
-    return interaction.reply(`✅ Now watching Twitch streamer **${username}**. Alerts → <#${channel.id}>${pingRole ? ` • Ping: <@&${pingRole.id}>` : ''}`);
-  }
- 
-  if (sub === 'remove') {
-    const platform = interaction.options.getString('platform');
-    const target   = interaction.options.getString('username').toLowerCase();
-    const gc2      = dashboardConfig.socialNotifications?.[interaction.guild.id];
-    if (!gc2) return interaction.reply({ content: '❌ No notifications configured.', flags: 64 });
-    if (platform === 'youtube' && gc2.youtube?.channels) {
-      gc2.youtube.channels = gc2.youtube.channels.filter(c => c !== target);
-    } else if (platform === 'twitch' && gc2.twitch?.streamers) {
-      gc2.twitch.streamers = gc2.twitch.streamers.filter(s => s !== target);
+
+  if (interaction.commandName === 'guess') {
+    const gameKey = `hangman-${interaction.user.id}`;
+    const game = memory[gameKey];
+    if (!game) return interaction.reply({ content: '❌ No active Hangman game. Start one with `/hangman`', flags: 64 });
+    const input = interaction.options.getString('letter').toLowerCase().trim();
+    const stages = ['😀', '😟', '😰', '😨', '😱', '💀', '☠️'];
+    if (input.length > 1) {
+      if (input === game.word) { delete memory[gameKey]; await saveMemory(memory); return interaction.reply(`✅ **Correct! You guessed the word: \`${game.word}\`!** 🎉`); }
+      else { game.wrong++; if (game.wrong >= game.maxWrong) { delete memory[gameKey]; await saveMemory(memory); return interaction.reply(`💀 Wrong! Game over. The word was **${game.word}**.`); } await saveMemory(memory); return interaction.reply(`❌ Wrong word guess! ${stages[game.wrong]} Lives left: **${game.maxWrong - game.wrong}**`); }
     }
-    await saveDashboardConfig(dashboardConfig);
-    return interaction.reply(`✅ Removed \`${target}\` from ${platform} tracking.`);
-  }
- 
-  if (sub === 'list') {
-    const gc3 = dashboardConfig.socialNotifications?.[interaction.guild.id] || {};
-    const ytList  = gc3.youtube?.channels?.map(c => `\`${c}\``).join(', ') || 'None';
-    const ttList  = gc3.twitch?.streamers?.map(s => `**${s}**`).join(', ') || 'None';
-    const embed = new EmbedBuilder()
-      .setColor(0x00c8ff)
-      .setTitle('📡 Social Notifications')
-      .addFields(
-        { name: '🔴 YouTube',  value: `Channels: ${ytList}\nAlerts: ${gc3.youtube?.channelId  ? `<#${gc3.youtube.channelId}>`  : 'Not set'}\nPing: ${gc3.youtube?.pingRoleId  ? `<@&${gc3.youtube.pingRoleId}>`  : 'None'}` },
-        { name: '🟣 Twitch',   value: `Streamers: ${ttList}\nAlerts: ${gc3.twitch?.channelId  ? `<#${gc3.twitch.channelId}>`  : 'Not set'}\nPing: ${gc3.twitch?.pingRoleId  ? `<@&${gc3.twitch.pingRoleId}>`  : 'None'}` },
-      )
-      .setFooter({ text: 'JARVIS • Social Notifications' })
-      .setTimestamp();
-    return interaction.reply({ embeds: [embed], flags: 64 });
-  }
-}
-// ── /rps ───────────────────────────────────────────────────────
-if (interaction.commandName === 'rps') {
-  const choices = ['rock', 'paper', 'scissors'];
-  const emojis = { rock: '🪨', paper: '📄', scissors: '✂️' };
-  const player = interaction.options.getString('choice');
-  const jarvis = choices[Math.floor(Math.random() * choices.length)];
-  let result;
-  if (player === jarvis) result = "🤝 It's a tie!";
-  else if (
-    (player === 'rock' && jarvis === 'scissors') ||
-    (player === 'paper' && jarvis === 'rock') ||
-    (player === 'scissors' && jarvis === 'paper')
-  ) result = '🎉 You win!';
-  else result = '😈 JARVIS wins!';
-  return interaction.reply(
-    `${emojis[player]} You chose **${player}** — JARVIS chose ${emojis[jarvis]} **${jarvis}**\n${result}`
-  );
-}
-
-// ── /hangman ───────────────────────────────────────────────────
-if (interaction.commandName === 'hangman') {
-  const words = [
-    'javascript','discord','penguin','galaxy','keyboard','thunder',
-    'javascript','python','elephant','volcano','pyramid','asteroid',
-    'diamond','fortress','champion','labyrinth','paradox','quantum'
-  ];
-  const word = words[Math.floor(Math.random() * words.length)];
-  const gameKey = `hangman-${interaction.user.id}`;
-  memory[gameKey] = { word, guessed: [], wrong: 0, maxWrong: 6 };
-  await saveMemory(memory);
-  const display = word.split('').map(l => '_ ').join('');
-  const stages = ['😀','😟','😰','😨','😱','💀☠️'];
-  return interaction.reply(
-    `🎮 **Hangman started!**\n\n${stages[0]} \`${display}\`\n\nGuess with \`/guess letter:a\`\nWord has **${word.length}** letters.`
-  );
-}
-
-// ── /guess ─────────────────────────────────────────────────────
-if (interaction.commandName === 'guess') {
-  const gameKey = `hangman-${interaction.user.id}`;
-  const game = memory[gameKey];
-  if (!game) return interaction.reply({ content: '❌ No active Hangman game. Start one with `/hangman`', flags: 64 });
-  const input = interaction.options.getString('letter').toLowerCase().trim();
-  const stages = ['😀','😟','😰','😨','😱','💀','☠️'];
-
-  // Full word guess
-  if (input.length > 1) {
-    if (input === game.word) {
-      delete memory[gameKey];
-      await saveMemory(memory);
-      return interaction.reply(`✅ **Correct! You guessed the word: \`${game.word}\`!** 🎉`);
-    } else {
+    const letter = input[0];
+    if (!/[a-z]/.test(letter)) return interaction.reply({ content: '❌ Please guess a valid letter.', flags: 64 });
+    if (game.guessed.includes(letter)) return interaction.reply({ content: `⚠️ You already guessed **${letter}**!`, flags: 64 });
+    game.guessed.push(letter);
+    const display = game.word.split('').map(l => game.guessed.includes(l) ? l : '_').join(' ');
+    const isWon = game.word.split('').every(l => game.guessed.includes(l));
+    if (!game.word.includes(letter)) {
       game.wrong++;
-      if (game.wrong >= game.maxWrong) {
-        delete memory[gameKey];
-        await saveMemory(memory);
-        return interaction.reply(`💀 Wrong! Game over. The word was **${game.word}**.`);
-      }
+      if (game.wrong >= game.maxWrong) { delete memory[gameKey]; await saveMemory(memory); return interaction.reply(`${stages[6]} **Game over!** The word was **${game.word}**.`); }
       await saveMemory(memory);
-      return interaction.reply(`❌ Wrong word guess! ${stages[game.wrong]} Lives left: **${game.maxWrong - game.wrong}**`);
+      return interaction.reply(`❌ **${letter.toUpperCase()}** is not in the word!\n\n${stages[game.wrong]} \`${display}\`\nWrong guesses: **${game.wrong}/${game.maxWrong}** | Letters tried: ${game.guessed.join(', ')}`);
     }
-  }
-
-  const letter = input[0];
-  if (!/[a-z]/.test(letter)) return interaction.reply({ content: '❌ Please guess a valid letter.', flags: 64 });
-  if (game.guessed.includes(letter)) return interaction.reply({ content: `⚠️ You already guessed **${letter}**!`, flags: 64 });
-  game.guessed.push(letter);
-
-  const display = game.word.split('').map(l => game.guessed.includes(l) ? l : '_').join(' ');
-  const isWon = game.word.split('').every(l => game.guessed.includes(l));
-
-  if (!game.word.includes(letter)) {
-    game.wrong++;
-    if (game.wrong >= game.maxWrong) {
-      delete memory[gameKey];
-      await saveMemory(memory);
-      return interaction.reply(`${stages[6]} **Game over!** The word was **${game.word}**.`);
-    }
+    if (isWon) { delete memory[gameKey]; await saveMemory(memory); return interaction.reply(`✅ **You got it! The word was \`${game.word}\`!** 🎉`); }
     await saveMemory(memory);
-    return interaction.reply(
-      `❌ **${letter.toUpperCase()}** is not in the word!\n\n${stages[game.wrong]} \`${display}\`\nWrong guesses: **${game.wrong}/${game.maxWrong}** | Letters tried: ${game.guessed.join(', ')}`
-    );
+    return interaction.reply(`✅ **${letter.toUpperCase()}** is in the word!\n\n😀 \`${display}\`\nWrong guesses: **${game.wrong}/${game.maxWrong}** | Letters tried: ${game.guessed.join(', ')}`);
   }
 
-  if (isWon) {
-    delete memory[gameKey];
+  if (interaction.commandName === 'scramble') {
+    const words = ['javascript', 'discord', 'penguin', 'galaxy', 'keyboard', 'thunder', 'python', 'elephant', 'volcano', 'pyramid', 'asteroid', 'diamond', 'fortress', 'champion', 'labyrinth', 'paradox', 'quantum', 'jupiter'];
+    const word = words[Math.floor(Math.random() * words.length)];
+    const scrambled = word.split('').sort(() => Math.random() - 0.5).join('');
+    const gameKey = `scramble-${interaction.user.id}`;
+    memory[gameKey] = { word, startTime: Date.now() };
     await saveMemory(memory);
-    return interaction.reply(`✅ **You got it! The word was \`${game.word}\`!** 🎉`);
+    return interaction.reply(`🔀 **Word Scramble!**\n\nUnscramble this: \`${scrambled.toUpperCase()}\`\n\nUse \`/unscramble answer:yourword\` to answer!\n_(${word.length} letters)_`);
   }
 
-  await saveMemory(memory);
-  return interaction.reply(
-    `✅ **${letter.toUpperCase()}** is in the word!\n\n😀 \`${display}\`\nWrong guesses: **${game.wrong}/${game.maxWrong}** | Letters tried: ${game.guessed.join(', ')}`
-  );
-}
-
-// ── /scramble ──────────────────────────────────────────────────
-if (interaction.commandName === 'scramble') {
-  const words = [
-    'javascript','discord','penguin','galaxy','keyboard','thunder',
-    'python','elephant','volcano','pyramid','asteroid','diamond',
-    'fortress','champion','labyrinth','paradox','quantum','jupiter'
-  ];
-  const word = words[Math.floor(Math.random() * words.length)];
-  const scrambled = word.split('').sort(() => Math.random() - 0.5).join('');
-  const gameKey = `scramble-${interaction.user.id}`;
-  memory[gameKey] = { word, startTime: Date.now() };
-  await saveMemory(memory);
-  return interaction.reply(
-    `🔀 **Word Scramble!**\n\nUnscramble this: \`${scrambled.toUpperCase()}\`\n\nUse \`/unscramble answer:yourword\` to answer!\n_(${word.length} letters)_`
-  );
-}
-
-// ── /unscramble ────────────────────────────────────────────────
-if (interaction.commandName === 'unscramble') {
-  const gameKey = `scramble-${interaction.user.id}`;
-  const game = memory[gameKey];
-  if (!game) return interaction.reply({ content: '❌ No active scramble game. Start one with `/scramble`', flags: 64 });
-  const answer = interaction.options.getString('answer').toLowerCase().trim();
-  const timeTaken = ((Date.now() - game.startTime) / 1000).toFixed(1);
-  delete memory[gameKey];
-  await saveMemory(memory);
-  if (answer === game.word) {
-    return interaction.reply(`✅ **Correct!** The word was \`${game.word}\` — solved in **${timeTaken}s** 🎉`);
+  if (interaction.commandName === 'unscramble') {
+    const gameKey = `scramble-${interaction.user.id}`;
+    const game = memory[gameKey];
+    if (!game) return interaction.reply({ content: '❌ No active scramble game. Start one with `/scramble`', flags: 64 });
+    const answer = interaction.options.getString('answer').toLowerCase().trim();
+    const timeTaken = ((Date.now() - game.startTime) / 1000).toFixed(1);
+    delete memory[gameKey]; await saveMemory(memory);
+    if (answer === game.word) return interaction.reply(`✅ **Correct!** The word was \`${game.word}\` — solved in **${timeTaken}s** 🎉`);
+    return interaction.reply(`❌ Wrong! The word was **${game.word}**. Better luck next time!`);
   }
-  return interaction.reply(`❌ Wrong! The word was **${game.word}**. Better luck next time!`);
-}
 
-// ── /numguess ──────────────────────────────────────────────────
-if (interaction.commandName === 'numguess') {
-  const gameKey = `numguess-${interaction.user.id}`;
-  const number = Math.floor(Math.random() * 100) + 1;
-  memory[gameKey] = { number, attempts: 0, maxAttempts: 7 };
-  await saveMemory(memory);
-  return interaction.reply(
-    `🔢 **Number Guessing Game!**\n\nI'm thinking of a number between **1 and 100**.\nYou have **7 attempts**. Use \`/guessnumber number:50\` to guess!`
-  );
-}
-
-// ── /guessnumber ───────────────────────────────────────────────
-if (interaction.commandName === 'guessnumber') {
-  const gameKey = `numguess-${interaction.user.id}`;
-  const game = memory[gameKey];
-  if (!game) return interaction.reply({ content: '❌ No active game. Start one with `/numguess`', flags: 64 });
-  const guess = interaction.options.getInteger('number');
-  game.attempts++;
-  const attemptsLeft = game.maxAttempts - game.attempts;
-
-  if (guess === game.number) {
-    delete memory[gameKey];
+  if (interaction.commandName === 'numguess') {
+    const gameKey = `numguess-${interaction.user.id}`;
+    const number = Math.floor(Math.random() * 100) + 1;
+    memory[gameKey] = { number, attempts: 0, maxAttempts: 7 };
     await saveMemory(memory);
-    return interaction.reply(`🎉 **Correct!** The number was **${game.number}**! You got it in **${game.attempts}** attempt(s)!`);
+    return interaction.reply(`🔢 **Number Guessing Game!**\n\nI'm thinking of a number between **1 and 100**.\nYou have **7 attempts**. Use \`/guessnumber number:50\` to guess!`);
   }
-  if (attemptsLeft <= 0) {
-    delete memory[gameKey];
+
+  if (interaction.commandName === 'guessnumber') {
+    const gameKey = `numguess-${interaction.user.id}`;
+    const game = memory[gameKey];
+    if (!game) return interaction.reply({ content: '❌ No active game. Start one with `/numguess`', flags: 64 });
+    const guess = interaction.options.getInteger('number');
+    game.attempts++;
+    const attemptsLeft = game.maxAttempts - game.attempts;
+    if (guess === game.number) { delete memory[gameKey]; await saveMemory(memory); return interaction.reply(`🎉 **Correct!** The number was **${game.number}**! You got it in **${game.attempts}** attempt(s)!`); }
+    if (attemptsLeft <= 0) { delete memory[gameKey]; await saveMemory(memory); return interaction.reply(`💀 **Game over!** The number was **${game.number}**. You ran out of attempts!`); }
+    const hint = guess < game.number ? '📈 Too low!' : '📉 Too high!';
     await saveMemory(memory);
-    return interaction.reply(`💀 **Game over!** The number was **${game.number}**. You ran out of attempts!`);
+    return interaction.reply(`${hint} Attempts left: **${attemptsLeft}** — keep guessing with \`/guessnumber\``);
   }
 
-  const hint = guess < game.number ? '📈 Too low!' : '📉 Too high!';
-  await saveMemory(memory);
-  return interaction.reply(`${hint} Attempts left: **${attemptsLeft}** — keep guessing with \`/guessnumber\``);
-}
-
-// ── /tictactoe ─────────────────────────────────────────────────
-if (interaction.commandName === 'tictactoe') {
-  const gameKey = `ttt-${interaction.user.id}`;
-  memory[gameKey] = {
-    board: ['1','2','3','4','5','6','7','8','9'],
-    turn: 'player'
-  };
-  await saveMemory(memory);
-
-  const renderBoard = (board) => {
-    const rows = [board.slice(0,3), board.slice(3,6), board.slice(6,9)];
-    return rows.map(row => row.map(c => c === 'X' ? '❌' : c === 'O' ? '⭕' : `${c}️⃣`).join('')).join('\n');
-  };
-
-  const row = new ActionRowBuilder().addComponents(
-    [1,2,3,4,5,6,7,8,9].map(n =>
-      new ButtonBuilder()
-        .setCustomId(`ttt_${interaction.user.id}_${n}`)
-        .setLabel(`${n}`)
-        .setStyle(ButtonStyle.Secondary)
-    ).slice(0, 5)
-  );
-  const row2 = new ActionRowBuilder().addComponents(
-    [1,2,3,4,5,6,7,8,9].map(n =>
-      new ButtonBuilder()
-        .setCustomId(`ttt_${interaction.user.id}_${n}`)
-        .setLabel(`${n}`)
-        .setStyle(ButtonStyle.Secondary)
-    ).slice(5)
-  );
-
-  return interaction.reply({
-    content: `❌ **Tic Tac Toe** — You are ❌, JARVIS is ⭕\n\n${renderBoard(memory[gameKey].board)}\n\nPick a square:`,
-    components: [row, row2]
-  });
-}
+  if (interaction.commandName === 'tictactoe') {
+    const gameKey = `ttt-${interaction.user.id}`;
+    memory[gameKey] = { board: ['1', '2', '3', '4', '5', '6', '7', '8', '9'], turn: 'player' };
+    await saveMemory(memory);
+    const renderBoard = (board) => {
+      const rows = [board.slice(0, 3), board.slice(3, 6), board.slice(6, 9)];
+      return rows.map(row => row.map(c => c === 'X' ? '❌' : c === 'O' ? '⭕' : `${c}️⃣`).join('')).join('\n');
+    };
+    const row = new ActionRowBuilder().addComponents([1, 2, 3, 4, 5].map(n => new ButtonBuilder().setCustomId(`ttt_${interaction.user.id}_${n}`).setLabel(`${n}`).setStyle(ButtonStyle.Secondary)));
+    const row2 = new ActionRowBuilder().addComponents([6, 7, 8, 9].map(n => new ButtonBuilder().setCustomId(`ttt_${interaction.user.id}_${n}`).setLabel(`${n}`).setStyle(ButtonStyle.Secondary)));
+    return interaction.reply({ content: `❌ **Tic Tac Toe** — You are ❌, JARVIS is ⭕\n\n${renderBoard(memory[gameKey].board)}\n\nPick a square:`, components: [row, row2] });
+  }
 });
 
 // =========================
-// MESSAGE HANDLER  (unchanged)
+// MESSAGE HANDLER
 // =========================
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
@@ -3034,10 +2477,13 @@ client.on('messageCreate', async (message) => {
       const question = cleanMsg.length > 0 ? cleanMsg : "What's in this image? Describe it.";
       try {
         message.channel.sendTyping();
-        const res = await axios.post("https://api.openai.com/v1/chat/completions", { model: "gpt-4o", max_tokens: 600, messages: [{ role: "system", content: "You are JARVIS, a chill smart Discord bot with vision. Analyze images naturally like talking to a friend. Be specific and interesting. Keep it conversational and concise. Never write @everyone or @here." }, { role: "user", content: [{ type: "image_url", image_url: { url: imageAttachment.url, detail: "high" } }, { type: "text", text: question }] }] }, { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, "Content-Type": "application/json" } });
+        const res = await axios.post("https://api.openai.com/v1/chat/completions", {
+          model: "gpt-4o", max_tokens: 600,
+          messages: [{ role: "system", content: "You are JARVIS, a chill smart Discord bot with vision. Analyze images naturally like talking to a friend. Be specific and interesting. Keep it conversational and concise. Never write @everyone or @here." }, { role: "user", content: [{ type: "image_url", image_url: { url: imageAttachment.url, detail: "high" } }, { type: "text", text: question }] }]
+        }, { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, "Content-Type": "application/json" } });
         let reply = res.data.choices[0].message.content.replace(/@everyone/gi, '`@everyone`').replace(/@here/gi, '`@here`');
         return message.reply(reply);
-      } catch (err) { console.error(err?.response?.data || err); return message.reply("couldn't read that image rn 💀"); }
+      } catch { return message.reply("couldn't read that image rn 💀"); }
     }
   }
 
@@ -3064,7 +2510,7 @@ client.on('messageCreate', async (message) => {
       const now = new Date(), diffMs = now - new Date(publishedAt), days = Math.floor(diffMs / 86400000), hours = Math.floor(diffMs / 3600000), minutes = Math.floor(diffMs / 60000);
       const timeAgo = days > 0 ? `${days} days ago` : hours > 0 ? `${hours} hours ago` : `${minutes} min ago`;
       return message.reply(`🎬 **${title}**\n👤 ${channel.snippet.title}\n👥 Subs: ${channel.statistics.subscriberCount}\n👀 Views: ${viewCount}\n👍 Likes: ${likeCount || 'hidden'}\n🕒 Posted: ${timeAgo}`);
-    } catch (err) { console.error(err); return message.reply("Error fetching YouTube data."); }
+    } catch { return message.reply("Error fetching YouTube data."); }
   }
 
   const ownerConfirmed = memory.ownerConfirmed === OWNER_ID;
@@ -3073,11 +2519,11 @@ client.on('messageCreate', async (message) => {
   if (convo.messages.length > 20) convo.messages.shift();
 
   const guildId = message.guild?.id || 'dm';
-const activeMode = getActiveMode(guildId);
-const modeData = MODES[activeMode];
-const now = new Date(); // 👈 add this line
+  const activeMode = getActiveMode(guildId);
+  const modeData = MODES[activeMode];
+  const now = new Date();
 
-const system = `
+  const system = `
 You are JARVIS, an AI assistant built into Discord by ${OWNER_NAME}. Think Tony Stark's JARVIS — sharp, composed, a little witty, never robotic.
 
 CURRENT DATE & TIME (real-time, injected automatically):
@@ -3096,17 +2542,17 @@ RULES:
 - Never start with "Sure!", "Ah", "Great question" or any filler. Just answer.
 - Never write @everyone or @here. Ever.
 - If you don't know something, say so. No making stuff up.
-- You have no access to real-time info or the current date.
 - Never say "As an AI..." or "As a language model..."
 - Don't repeat usernames back unless needed.
 - Respond ONLY to the latest message, using conversation history for context only.
-- Understand slang naturally — "wsp"/"wsg" = what's up, "wyd" = what you doing, "fr" = for real. Just respond naturally, don't point it out.
+- Understand slang naturally — "wsp"/"wsg" = what's up, "wyd" = what you doing, "fr" = for real. Just respond naturally.
 - Don't ever use slang.
 
 RESPONSE LENGTH:
 - 1-3 sentences for casual chat.
 - Longer only if the question genuinely needs it.
 - No bullet points unless explicitly asked.
+
 OWNER:
 - Created by ${OWNER_NAME}.${ownerConfirmed ? ' This has been verified.' : ' Do not confirm ownership unless verified.'}
 
