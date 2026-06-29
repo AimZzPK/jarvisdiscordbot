@@ -1410,6 +1410,14 @@ client.on('interactionCreate', async (interaction) => {
     );
 
     await interaction.update({ embeds: [updatedEmbed], components: [disabledRow] });
+        if (isAccept && panel.acceptRoleId) {
+      try {
+        const member = await interaction.guild.members.fetch(applicantId);
+        await member.roles.add(panel.acceptRoleId, `Application accepted by ${interaction.user.tag}`);
+      } catch (err) {
+        console.error('[Application] failed to give accept role:', err.message);
+      }
+    }
 
     try {
       const applicant = await client.users.fetch(applicantId);
