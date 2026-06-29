@@ -181,7 +181,13 @@ const client = new Client({
   ],
   partials: [Partials.Channel, Partials.Message, Partials.GuildMember]
 });
+process.on('unhandledRejection', (err) => {
+  console.error('[UnhandledRejection]', err);
+});
 
+client.on('error', (err) => {
+  console.error('[ClientError]', err);
+});
 // =========================
 // AI
 // =========================
@@ -1571,7 +1577,7 @@ client.on('interactionCreate', async (interaction) => {
     const panelId = interaction.customId.split('__')[1] || 'application';
     const panel = getApplicationPanel(interaction.guild.id, panelId);
     const questions = panel.questions || [];
-    const answers = questions.map((q, i) => ({ question: q, answer: interaction.fields.getTextInputValue(`aq_${i}`) || 'No answer' }));
+    const answers = questions.slice(0, 5).map((q, i) => ({ question: q, answer: interaction.fields.getTextInputValue(`aq_${i}`) || 'No answer' }));
     await interaction.deferReply({ flags: 64 });
     try {
       const result = await submitApplication(interaction.guild, interaction.user, panelId, answers);
