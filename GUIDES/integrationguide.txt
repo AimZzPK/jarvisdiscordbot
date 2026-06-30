@@ -1,0 +1,206 @@
+# Integrating Role Systems into index.js
+
+Copy `roleSystems.js` into your project root (same folder as `index.js`).
+
+## 1. Add the import near your other requires (top of index.js)
+
+```javascript
+const {
+  initRoleSystems,
+  getRolePanelList,
+  getRolePanel,
+  handleAutorole,
+  postRolePanel,
+  saveRolePanelMessageId,
+  handleRoleSystemInteraction,
+  handleReactionAdd,
+  handleReactionRemove,
+} = require('./roleSystems');
+```
+
+Also add to your existing discord.js import list (you likely already have some of these):
+```javascript
+StringSelectMenuBuilder,
+```
+
+## 2. Add intents (required for reaction roles)
+
+Your client needs `GatewayIntentBits.GuildMessageReactions` and the `Partials.Message`/`Partials.Reaction` partials, since reaction events on uncached messages need partials.
+
+```javascript
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.DirectMessages,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildModeration,
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMessageReactions, // ADD THIS
+  ],
+  partials: [Partials.Channel, Partials.Message, Partials.GuildMember, Partials.Reaction] // ADD Partials.Reaction
+});
+```
+
+Also enable the "Message Content Intent" / "Server Members Intent" in the Discord Developer Portal if not already (you already have GuildMembers so this should be fine).
+
+## 3. Initialize the module in clientReady (after loadDashboardConfig)
+
+```javascript
+client.once('clientReady', async () => {
+  await loadMemory();
+  await loadDashboardConfig();
+
+  initRoleSystems(client, redis, () => dashboardConfig); // ADD THIS
+
+  // ...rest of existing clientReady code
+```
+
+## 4. Hook autoroles into guildMemberAdd
+
+Find your existing `client.on('guildMemberAdd', ...)` handler and add this near the top, right after the join log push:
+
+```javascript
+client.on('guildMemberAdd', async (member) => {
+  const event = { type: 'join', userId: member.id, username: member.user.tag, detail: `Account created: <t:${Math.floor(member.user.createdTimestamp / 1000)}:R>` };
+  await pushLogEvent(member.guild.id, event);
+
+  await handleAutorole(member); // ADD THIS LINE
+
+  // ...rest of existing guildMemberAdd code (logging embed, welcome message)
+```
+
+## 5. Hook reaction role events (new listeners, add anywhere with your other client.on calls)
+
+```javascript
+client.on('messageReactionAdd', async (reaction, user) => {
+  await handleReactionAdd(reaction, user);
+});
+
+client.on('messageReactionRemove', async (reaction, user) => {
+  await handleReactionRemove(reaction, user);
+});
+```
+
+## 6. Hook button/dropdown role interactions into interactionCreate
+
+At the very top of your `client.on('interactionCreate', async (interaction) => {` handler, before the trivia button check, add:
+
+```javascript
+client.on('interactionCreate', async (interaction) => {
+
+  // ── Role panel buttons/dropdowns ────────────────────────────────
+  if (await handleRoleSystemInteraction(interaction)) return;
+
+  // ── Trivia buttons ─────────────────────────────────────────────
+  if (interaction.isButton() && interaction.customId.startsWith('trivia_')) {
+    // ...existing code
+```
+
+## 7. Add slash commands
+
+Add these to your `commands` array (anywhere, e.g. right after the `/setvoicechannel` / `/leavevoice` entries):
+
+```javascript
+new SlashCommandBuilder()
+  .setName('setuprolepanel').setDescription('Post a role panel (button/dropdown/reaction) in this channel (admin only)')
+  .addStringOption(o => o.setName('panel').setDescription('Role panel ID to post').setRequired(true))
+  .setDMPermission(false),
+new SlashCommandBuilder().setName('listrolepanels').setDescription('List all role panels configured for this server').setDMPermission(false),
+new SlashCommandBuilder()
+  .setName('autorole').setDescription('Manage autoroles (roles given automatically when someone joins)')
+  .addSubcommand(sub => sub.setName('add').setDescription('Add a role to autoroles')
+    .addRoleOption(o => o.setName('role').setDescription('Role to auto-assign on join').setRequired(true)))
+  .addSubcommand(sub => sub.setName('remove').setDescription('Remove a role from autoroles')
+    .addRoleOption(o => o.setName('role').setDescription('Role to remove from autoroles').setRequired(true)))
+  .addSubcommand(sub => sub.setName('list').setDescription('List current autoroles'))
+  .addSubcommand(sub => sub.setName('toggle').setDescription('Enable or disable autoroles entirely')
+    .addBooleanOption(o => o.setName('enabled').setDescription('Turn autoroles on or off').setRequired(true)))
+  .setDMPermission(false),
+```
+
+## 8. Add slash command handlers
+
+Add these inside your `interactionCreate` handler, anywhere after the `if (!interaction.isChatInputCommand()) return;` line (e.g. right after the `/setvoicechannel`/`leavevoice` handlers):
+
+```javascript
+  // ── /setuprolepanel ───────────────────────────────────────────
+  if (interaction.commandName === 'setuprolepanel') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    if (!interaction.member.permissions.has('ManageRoles')) return interaction.reply({ content: '❌ You need **Manage Roles** permission.', flags: 64 });
+    const panelId = interaction.options.getString('panel');
+    const panel = getRolePanel(interaction.guild.id, panelId);
+    if (!panel) return interaction.reply({ content: `❌ No role panel found with ID \`${panelId}\`. Create one in the dashboard first.`, flags: 64 });
+    if (!panel.options || panel.options.length === 0) return interaction.reply({ content: '❌ This panel has no role options configured yet.', flags: 64 });
+
+    try {
+      const msg = await postRolePanel(interaction.channel, panel);
+      const updatedCfg = await saveRolePanelMessageId(interaction.guild.id, panel.id, interaction.channel.id, msg.id);
+      await saveDashboardConfig(updatedCfg);
+      return interaction.reply({ content: `✅ Role panel **${panel.title || panel.id}** posted! (${panel.type})`, flags: 64 });
+    } catch (err) {
+      console.error('[RolePanel] setup failed:', err);
+      return interaction.reply({ content: '❌ Failed to post role panel. Make sure I have permission to send messages and manage roles, and that my role is positioned above the roles you want to assign.', flags: 64 });
+    }
+  }
+
+  // ── /listrolepanels ────────────────────────────────────────────
+  if (interaction.commandName === 'listrolepanels') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    const panelList = getRolePanelList(interaction.guild.id);
+    if (panelList.length === 0) return interaction.reply({ content: '❌ No role panels configured. Use the dashboard to create one first.', flags: 64 });
+    const typeEmoji = { button: '🔘', dropdown: '📋', reaction: '😀' };
+    const lines = panelList.map(p => {
+      const posted = p.messageId ? `Posted in <#${p.channelId}>` : '⚠️ Not posted yet';
+      return `${typeEmoji[p.type] || '🎭'} **${p.title || p.id}** — ID: \`${p.id}\` (${p.type})\n  ${posted} • ${p.options?.length || 0} option(s)\n  Post with: \`/setuprolepanel panel:${p.id}\``;
+    }).join('\n\n');
+    return interaction.reply({ embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('🎭 Role Panels').setDescription(lines).setFooter({ text: `${panelList.length} panel(s) configured • JARVIS Role Systems` }).setTimestamp()], flags: 64 });
+  }
+
+  // ── /autorole ──────────────────────────────────────────────────
+  if (interaction.commandName === 'autorole') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    if (!interaction.member.permissions.has('ManageRoles')) return interaction.reply({ content: '❌ You need **Manage Roles** permission.', flags: 64 });
+    const sub = interaction.options.getSubcommand();
+
+    dashboardConfig.roleSystems = dashboardConfig.roleSystems || {};
+    dashboardConfig.roleSystems[interaction.guild.id] = dashboardConfig.roleSystems[interaction.guild.id] || { autoroles: { enabled: false, roleIds: [] }, panels: [] };
+    const rsConfig = dashboardConfig.roleSystems[interaction.guild.id];
+    rsConfig.autoroles = rsConfig.autoroles || { enabled: false, roleIds: [] };
+
+    if (sub === 'add') {
+      const role = interaction.options.getRole('role');
+      if (!rsConfig.autoroles.roleIds.includes(role.id)) rsConfig.autoroles.roleIds.push(role.id);
+      await saveDashboardConfig(dashboardConfig);
+      return interaction.reply(`✅ <@&${role.id}> added to autoroles. New members will receive it automatically${rsConfig.autoroles.enabled ? '.' : ' once autoroles are enabled (\`/autorole toggle enabled:true\`).'}`);
+    }
+    if (sub === 'remove') {
+      const role = interaction.options.getRole('role');
+      rsConfig.autoroles.roleIds = rsConfig.autoroles.roleIds.filter(id => id !== role.id);
+      await saveDashboardConfig(dashboardConfig);
+      return interaction.reply(`✅ <@&${role.id}> removed from autoroles.`);
+    }
+    if (sub === 'list') {
+      const list = rsConfig.autoroles.roleIds.map(id => `<@&${id}>`).join(', ') || 'None configured';
+      return interaction.reply({ content: `🎭 **Autoroles** (${rsConfig.autoroles.enabled ? '🟢 enabled' : '🔴 disabled'}):\n${list}`, flags: 64 });
+    }
+    if (sub === 'toggle') {
+      const enabled = interaction.options.getBoolean('enabled');
+      rsConfig.autoroles.enabled = enabled;
+      await saveDashboardConfig(dashboardConfig);
+      return interaction.reply(`✅ Autoroles are now **${enabled ? 'enabled' : 'disabled'}**.`);
+    }
+  }
+```
+
+## 9. (Optional) /help update
+
+Add a line to your `/help` embed description:
+```
+/autorole add/remove/list/toggle - manage join autoroles
+/setuprolepanel [panel] - post a button/dropdown/reaction role panel
+/listrolepanels - list all configured role panels
+```
+
+That's the entire bot-side integration. No other existing code needs to change.

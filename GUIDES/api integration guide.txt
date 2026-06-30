@@ -1,0 +1,76 @@
+# Integrating Role Systems into [guildId].js (config API route)
+
+## 1. Add to buildGuildConfig() return object
+
+Inside `buildGuildConfig(config, guildId)`, add this property to the returned object (anywhere, e.g. right after `applicationPanels`):
+
+```javascript
+    roleSystems: {
+      autoroles: {
+        enabled: !!config.roleSystems?.[guildId]?.autoroles?.enabled,
+        roleIds: config.roleSystems?.[guildId]?.autoroles?.roleIds || [],
+      },
+      panels: (config.roleSystems?.[guildId]?.panels || []).map(p => ({
+        ...p,
+        options: p.options || [],
+      })),
+    },
+```
+
+## 2. Add POST handling
+
+Inside the POST handler, after the `applicationPanels` block and before `await saveDashboardConfig(config);`, add:
+
+```javascript
+      // ── Role systems (autoroles + panels) ──────────────────
+      if (body.roleSystems && typeof body.roleSystems === 'object') {
+        config.roleSystems = config.roleSystems || {};
+        const rs = body.roleSystems;
+
+        const autoroles = rs.autoroles || {};
+        const validAutoRoleIds = Array.isArray(autoroles.roleIds)
+          ? autoroles.roleIds.map(r => String(r).trim()).filter(r => /^\d{5,25}$/.test(r))
+          : [];
+
+        const validPanels = Array.isArray(rs.panels)
+          ? rs.panels
+              .filter(p => p && typeof p.id === 'string' && p.id.trim() && ['button', 'dropdown', 'reaction'].includes(p.type))
+              .map(p => {
+                const existing = (config.roleSystems[guildId]?.panels || []).find(ep => ep.id === p.id.trim().toLowerCase());
+                return {
+                  id:          p.id.trim().toLowerCase().slice(0, 30),
+                  type:        p.type,
+                  title:       typeof p.title === 'string' ? p.title.slice(0, 100) : '🎭 Role Selection',
+                  description: typeof p.description === 'string' ? p.description.slice(0, 500) : '',
+                  color:       /^#[0-9a-fA-F]{6}$/.test(p.color) ? p.color : '#5865f2',
+                  multiSelect: !!p.multiSelect,
+                  placeholder: typeof p.placeholder === 'string' ? p.placeholder.slice(0, 100) : 'Select your roles',
+                  // Preserve messageId/channelId set by the bot when posted via /setuprolepanel
+                  channelId:   existing?.channelId || null,
+                  messageId:   existing?.messageId || null,
+                  options: Array.isArray(p.options)
+                    ? p.options.slice(0, 25).map((o, i) => ({
+                        id:          typeof o.id === 'string' && o.id.trim() ? o.id.trim().slice(0, 20) : `opt${i}`,
+                        label:       typeof o.label === 'string' ? o.label.slice(0, 100) : 'Role',
+                        description: typeof o.description === 'string' ? o.description.slice(0, 100) : '',
+                        emoji:       typeof o.emoji === 'string' ? o.emoji.slice(0, 50) : '',
+                        roleId:      typeof o.roleId === 'string' && /^\d{5,25}$/.test(o.roleId.trim()) ? o.roleId.trim() : null,
+                      }))
+                    : [],
+                };
+              })
+          : [];
+
+        config.roleSystems[guildId] = {
+          autoroles: {
+            enabled: !!autoroles.enabled,
+            roleIds: validAutoRoleIds,
+          },
+          panels: validPanels,
+        };
+      }
+```
+
+## Why messageId/channelId are preserved
+
+When the dashboard saves, it doesn't know the Discord message ID of an already-posted panel (only the bot knows that, after `/setuprolepanel` runs). The POST handler looks up the *existing* stored panel by ID and carries over `channelId`/`messageId` so a dashboard edit (e.g. changing the title or adding an option) doesn't wipe out the panel's "already posted" state. If you change a panel's options after posting, you'll need to run `/setuprolepanel` again to repost it with the new options reflected in the embed/components — existing posted messages aren't retroactively edited.

@@ -1,0 +1,425 @@
+# Integrating Role Systems into dashboard.html
+
+## 1. Add nav item
+
+Inside `<nav class="sidebar">`, add this after the "Auto Moderation" nav-item and before "Ticket Panels":
+
+```html
+<div class="nav-item" data-page="rolesystems" onclick="nav(this)">
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="6" cy="5" r="2.5"/><circle cx="11" cy="10" r="2.5"/><path d="M2 14c0-2.2 1.8-4 4-4s4 1.8 4 4M7 12c.5-1.8 2.1-3 4-3 2.2 0 4 1.8 4 4"/></svg>
+  Role Systems
+</div>
+```
+
+## 2. Add the page markup
+
+Add this new `<div class="page" id="page-rolesystems">` block anywhere inside `<main class="main">`, e.g. right after the Auto Moderation page and before Ticket Panels:
+
+```html
+<!-- ROLE SYSTEMS -->
+<div class="page" id="page-rolesystems">
+  <div class="page-title">Role Systems</div>
+  <div class="page-sub">Auto-assign roles on join, and let members pick roles with buttons, dropdowns, or reactions.</div>
+
+  <div class="card">
+    <div class="card-title">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="5" cy="4" r="2"/><circle cx="9" cy="9" r="2"/><path d="M1 13c0-2 1.5-3.5 3.5-3.5S8 11 8 13M6 11c.4-1.5 1.7-2.5 3-2.5 1.8 0 3 1.5 3 3.5"/></svg>
+      Autoroles
+    </div>
+    <div class="toggle-row" style="border:none;padding:0 0 16px;">
+      <div class="toggle-info">
+        <div class="toggle-name">Enable autoroles</div>
+        <div class="toggle-desc">Automatically give selected roles to new members when they join</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="autorole-master" onchange="toggleAutoroleMaster()">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+    <div id="autorole-section" style="opacity:.4;pointer-events:none;">
+      <div class="field" style="margin-bottom:0;">
+        <label>Role IDs <span style="font-size:10px;color:var(--text-muted);text-transform:none;">(comma-separated)</span></label>
+        <input type="text" id="autorole-ids" placeholder="e.g. 1122334455, 9988776655">
+        <div class="field-hint">Right-click a role in Server Settings - Roles - Copy Role ID. Add multiple separated by commas.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="2" width="12" height="10" rx="2"/><line x1="4" y1="6" x2="10" y2="6"/><line x1="4" y1="9" x2="7" y2="9"/></svg>
+      Role panels
+      <span class="badge" id="rolepanel-count-badge">0</span>
+    </div>
+    <div id="rolepanels-list" class="panels-list"></div>
+    <button class="add-panel-btn" id="add-rolepanel-btn" onclick="addRolePanel()">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16"><line x1="7" y1="2" x2="7" y2="12"/><line x1="2" y1="7" x2="12" y2="7"/></svg>
+      Add new role panel
+    </button>
+  </div>
+
+  <div class="card" style="background:var(--surface2);border-style:dashed;">
+    <div class="card-title" style="margin-bottom:10px;">
+      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="6"/><line x1="7" y1="4" x2="7" y2="7"/><circle cx="7" cy="9.5" r=".5" fill="currentColor"/></svg>
+      How to use
+    </div>
+    <p style="font-size:13px;color:var(--text-muted);line-height:1.7;">
+      1. Pick a panel type — <strong>Buttons</strong>, <strong>Dropdown</strong>, or <strong>Reactions</strong> — and add role options with a label, role ID, and (for reactions) an emoji.<br>
+      2. Toggle <strong>Multi-select</strong> if members should be able to hold more than one role from this panel at once.<br>
+      3. Hit <strong>Save Changes</strong>, then run <code>/setuprolepanel panel:&lt;id&gt;</code> in Discord to post it.<br>
+      4. If you edit options after posting, run <code>/setuprolepanel</code> again to repost with the changes — JARVIS doesn't retroactively edit old panel messages.<br>
+      5. Use <code>/autorole add/remove/list/toggle</code> in Discord, or the section above, to manage roles given automatically on join.
+    </p>
+  </div>
+</div>
+```
+
+## 3. Add the JS state, builders, and save logic
+
+Add this block anywhere in the `<script>` section, e.g. right after the `appPanels`-related functions (after `commitAppPanelId`):
+
+```javascript
+// --- Role Systems state ---
+let rolePanels = [];
+let autoroleEnabled = false;
+let autoroleIds = [];
+
+const ROLEPANEL_TYPES = [
+  { key: 'button',   label: 'Buttons',  desc: 'Up to 25 role buttons (5 per row)' },
+  { key: 'dropdown', label: 'Dropdown', desc: 'A select menu, up to 25 options' },
+  { key: 'reaction', label: 'Reactions', desc: 'React with an emoji to get a role' },
+];
+
+function toggleAutoroleMaster() {
+  const on = document.getElementById('autorole-master').checked;
+  const sec = document.getElementById('autorole-section');
+  sec.style.opacity = on ? '1' : '0.4';
+  sec.style.pointerEvents = on ? '' : 'none';
+}
+
+function buildRolePanels() {
+  const list = document.getElementById('rolepanels-list');
+  const badge = document.getElementById('rolepanel-count-badge');
+  badge.textContent = rolePanels.length;
+  if (rolePanels.length === 0) {
+    list.innerHTML = `
+      <div class="empty-panels">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <circle cx="9" cy="8" r="3"/><circle cx="16" cy="14" r="3"/>
+          <path d="M3 21c0-3.3 2.7-6 6-6s6 2.7 6 6M11 18c.6-2.5 2.8-4.3 5-4.3 3 0 5.5 2.5 5.5 5.8"/>
+        </svg>
+        No role panels yet. Hit "Add new role panel" to create your first one.
+      </div>`;
+    return;
+  }
+  list.innerHTML = rolePanels.map((p, idx) => renderRolePanelItem(p, idx)).join('');
+}
+
+function renderRolePanelItem(p, idx) {
+  const color = p.color || '#5865f2';
+  const options = p.options || [];
+  const typeInfo = ROLEPANEL_TYPES.find(t => t.key === p.type) || ROLEPANEL_TYPES[0];
+  const postedBadge = p.messageId
+    ? '<span class="badge" style="border-color:rgba(34,197,94,.4);color:var(--success);background:var(--success-dim);">Posted</span>'
+    : '<span class="badge" style="border-color:rgba(245,158,11,.4);color:var(--warn);background:var(--warn-dim);">Not posted</span>';
+  return `
+    <div class="panel-item" id="rolepanel-item-${p.id}">
+      <div class="panel-header" onclick="toggleRolePanel('${p.id}')">
+        <div class="panel-color-dot" style="background:${color};"></div>
+        <div class="panel-header-title">${escapeHtml(p.title || 'Untitled Panel')}</div>
+        ${postedBadge}
+        <div class="panel-header-id">ID: <code>${p.id}</code> - ${typeInfo.label} - ${options.length} option(s)</div>
+        <span class="panel-chevron">▼</span>
+      </div>
+      <div class="panel-body">
+        <div class="panel-fields">
+          <div class="field">
+            <label>Panel ID</label>
+            <input type="text" value="${escapeHtml(p.id)}"
+              oninput="updateRolePanelId('${p.id}', this)"
+              onblur="commitRolePanelId('${p.id}', this)"
+              placeholder="e.g. colors" style="font-family:monospace;">
+            <div class="field-hint" id="rolepanel-id-hint-${p.id}">Used as: /setuprolepanel panel:${escapeHtml(p.id)}</div>
+          </div>
+          <div class="field">
+            <label>Panel type</label>
+            <select onchange="updateRolePanel('${p.id}', 'type', this.value)">
+              ${ROLEPANEL_TYPES.map(t => `<option value="${t.key}" ${p.type === t.key ? 'selected' : ''}>${t.label}</option>`).join('')}
+            </select>
+            <div class="field-hint">${typeInfo.desc}</div>
+          </div>
+          <div class="field">
+            <label>Embed accent color</label>
+            <input type="color" value="${color}"
+              oninput="updateRolePanel('${p.id}', 'color', this.value)"
+              style="width:60px;height:36px;padding:2px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;">
+          </div>
+          <div class="field">
+            <label>Multi-select</label>
+            <div class="toggle-row" style="border:none;padding:8px 0 0;">
+              <label class="toggle">
+                <input type="checkbox" ${p.multiSelect ? 'checked' : ''} onchange="updateRolePanel('${p.id}', 'multiSelect', this.checked)">
+                <span class="toggle-slider"></span>
+              </label>
+              <div class="toggle-info" style="margin-left:10px;padding:0;">
+                <div class="toggle-desc">Allow members to hold more than one role from this panel</div>
+              </div>
+            </div>
+          </div>
+          <div class="field field-full">
+            <label>Embed title</label>
+            <input type="text" value="${escapeHtml(p.title || '')}"
+              oninput="updateRolePanel('${p.id}', 'title', this.value)"
+              placeholder="Pick your roles" maxlength="100">
+          </div>
+          <div class="field field-full">
+            <label>Embed description</label>
+            <input type="text" value="${escapeHtml(p.description || '')}"
+              oninput="updateRolePanel('${p.id}', 'description', this.value)"
+              placeholder="Choose the roles you'd like below." maxlength="500">
+          </div>
+          ${p.type === 'dropdown' ? `
+          <div class="field field-full">
+            <label>Dropdown placeholder text</label>
+            <input type="text" value="${escapeHtml(p.placeholder || '')}"
+              oninput="updateRolePanel('${p.id}', 'placeholder', this.value)"
+              placeholder="Select your roles" maxlength="100">
+          </div>` : ''}
+        </div>
+
+        <div style="margin-top:18px;">
+          <div style="font-size:12px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:12px;">
+            Role options (max 25)
+          </div>
+          <div id="rolepanel-options-${p.id}" style="display:flex;flex-direction:column;gap:10px;">
+            ${options.map((o, oi) => renderRoleOptionItem(p, o, oi)).join('')}
+          </div>
+          ${options.length < 25 ? `
+          <button type="button" onclick="addRoleOption('${p.id}')"
+            style="margin-top:10px;width:100%;background:none;border:1px dashed var(--border);color:var(--text-muted);border-radius:5px;padding:8px;cursor:pointer;font-size:12px;font-family:inherit;transition:all .12s;"
+            onmouseover="this.style.borderColor='var(--border-active)';this.style.color='var(--accent)'"
+            onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--text-muted)'">
+            + Add role option
+          </button>` : `<div style="font-size:11px;color:var(--text-muted);margin-top:8px;text-align:center;">Maximum 25 options reached</div>`}
+        </div>
+
+        <div class="panel-actions">
+          <span style="font-size:11px;color:var(--text-muted);flex:1;">Post with: <code>/setuprolepanel panel:${escapeHtml(p.id)}</code></span>
+          <button class="btn btn-danger" onclick="removeRolePanel('${p.id}')">
+            <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" width="13" height="13"><polyline points="1,3 13,3"/><path d="M5 3V2h4v1M2 3l1 9a1 1 0 001 1h6a1 1 0 001-1l1-9"/></svg>
+            Delete panel
+          </button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function renderRoleOptionItem(panel, o, oi) {
+  const showEmoji = panel.type === 'reaction' || panel.type === 'button';
+  return `
+    <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px;" id="roleopt-item-${panel.id}-${oi}">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+        <span style="font-size:12px;font-weight:700;color:var(--accent);">Option ${oi + 1}</span>
+        <button type="button" onclick="removeRoleOption('${panel.id}', ${oi})"
+          style="background:none;border:1px solid rgba(255,77,77,.4);color:var(--danger);border-radius:4px;padding:3px 8px;cursor:pointer;font-size:11px;">✕ Remove</button>
+      </div>
+      <div style="display:grid;grid-template-columns:${showEmoji ? '1fr 1fr 80px' : '1fr 1fr'};gap:10px;margin-bottom:10px;">
+        <div class="field" style="margin-bottom:0;">
+          <label>Label</label>
+          <input type="text" value="${escapeHtml(o.label || '')}"
+            oninput="updateRoleOption('${panel.id}', ${oi}, 'label', this.value)"
+            placeholder="e.g. Gamer" maxlength="100">
+        </div>
+        <div class="field" style="margin-bottom:0;">
+          <label>Role ID</label>
+          <input type="text" value="${escapeHtml(o.roleId || '')}"
+            oninput="updateRoleOption('${panel.id}', ${oi}, 'roleId', this.value)"
+            placeholder="e.g. 9988776655">
+        </div>
+        ${showEmoji ? `
+        <div class="field" style="margin-bottom:0;">
+          <label>Emoji${panel.type === 'reaction' ? ' *' : ''}</label>
+          <input type="text" value="${escapeHtml(o.emoji || '')}"
+            oninput="updateRoleOption('${panel.id}', ${oi}, 'emoji', this.value)"
+            placeholder="🎮">
+        </div>` : ''}
+      </div>
+      <div class="field" style="margin-bottom:0;">
+        <label>Description <span style="font-size:9px;color:var(--text-muted);text-transform:none;">(optional)</span></label>
+        <input type="text" value="${escapeHtml(o.description || '')}"
+          oninput="updateRoleOption('${panel.id}', ${oi}, 'description', this.value)"
+          placeholder="Get pinged for gaming events" maxlength="100">
+      </div>
+    </div>`;
+}
+
+function toggleRolePanel(id) {
+  const el = document.getElementById('rolepanel-item-' + id);
+  if (el) el.classList.toggle('expanded');
+}
+
+function updateRolePanel(id, field, value) {
+  const p = rolePanels.find(p => p.id === id);
+  if (!p) return;
+  p[field] = value;
+  if (field === 'type') { buildRolePanels(); setTimeout(() => { const el = document.getElementById('rolepanel-item-' + id); if (el) el.classList.add('expanded'); }, 50); return; }
+  if (field === 'color') { const dot = document.querySelector(`#rolepanel-item-${id} .panel-color-dot`); if (dot) dot.style.background = value; }
+  if (field === 'title') { const ht = document.querySelector(`#rolepanel-item-${id} .panel-header-title`); if (ht) ht.textContent = value || 'Untitled Panel'; }
+}
+
+function addRolePanel() {
+  const id = 'role' + Date.now().toString(36).slice(-4);
+  rolePanels.push({
+    id, type: 'button', title: '', description: '', color: '#5865f2',
+    multiSelect: true, placeholder: 'Select your roles',
+    channelId: null, messageId: null,
+    options: [{ id: 'opt0', label: '', roleId: '', emoji: '', description: '' }],
+  });
+  buildRolePanels();
+  setTimeout(() => {
+    const el = document.getElementById('rolepanel-item-' + id);
+    if (el) { el.classList.add('expanded'); el.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
+  }, 50);
+}
+
+function removeRolePanel(id) {
+  rolePanels = rolePanels.filter(p => p.id !== id);
+  buildRolePanels();
+}
+
+function syncRoleOptionsFromDom(panelId) {
+  const p = rolePanels.find(p => p.id === panelId); if (!p) return;
+  (p.options || []).forEach((o, oi) => {
+    const container = document.getElementById(`roleopt-item-${panelId}-${oi}`); if (!container) return;
+    const inputs = container.querySelectorAll('input[type="text"]');
+    if (inputs[0]) o.label = inputs[0].value;
+    if (inputs[1]) o.roleId = inputs[1].value;
+    if (p.type === 'reaction' || p.type === 'button') {
+      if (inputs[2]) o.emoji = inputs[2].value;
+      if (inputs[3]) o.description = inputs[3].value;
+    } else {
+      if (inputs[2]) o.description = inputs[2].value;
+    }
+  });
+}
+
+function addRoleOption(panelId) {
+  const p = rolePanels.find(p => p.id === panelId); if (!p) return;
+  if (!p.options) p.options = [];
+  if (p.options.length >= 25) return;
+  syncRoleOptionsFromDom(panelId);
+  p.options.push({ id: 'opt' + Date.now().toString(36).slice(-4), label: '', roleId: '', emoji: '', description: '' });
+  buildRolePanels();
+  setTimeout(() => { const el = document.getElementById('rolepanel-item-' + panelId); if (el) el.classList.add('expanded'); }, 50);
+}
+
+function removeRoleOption(panelId, oi) {
+  const p = rolePanels.find(p => p.id === panelId); if (!p || !p.options) return;
+  syncRoleOptionsFromDom(panelId);
+  p.options.splice(oi, 1);
+  buildRolePanels();
+  setTimeout(() => { const el = document.getElementById('rolepanel-item-' + panelId); if (el) el.classList.add('expanded'); }, 50);
+}
+
+function updateRoleOption(panelId, oi, field, value) {
+  const p = rolePanels.find(p => p.id === panelId); if (!p || !p.options || !p.options[oi]) return;
+  p.options[oi][field] = value;
+}
+
+function updateRolePanelId(oldId, input) {
+  const p = rolePanels.find(p => p.id === oldId); if (!p) return;
+  const hint = document.getElementById('rolepanel-id-hint-' + oldId);
+  const preview = input.value.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (hint) {
+    if (preview && rolePanels.some(other => other !== p && other.id === preview)) { hint.textContent = '⚠️ That ID is already in use.'; hint.style.color = 'var(--danger)'; }
+    else { hint.textContent = `Used as: /setuprolepanel panel:${preview || oldId}`; hint.style.color = ''; }
+  }
+}
+
+function commitRolePanelId(oldId, input) {
+  const p = rolePanels.find(p => p.id === oldId); if (!p) return;
+  const raw = input.value.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const hint = document.getElementById('rolepanel-id-hint-' + oldId);
+  if (!raw) { input.value = oldId; if (hint) { hint.textContent = `Used as: /setuprolepanel panel:${oldId}`; hint.style.color = ''; } return; }
+  if (rolePanels.some(other => other !== p && other.id === raw)) { input.value = oldId; if (hint) { hint.textContent = '⚠️ That ID is already in use — reverted.'; hint.style.color = 'var(--danger)'; } return; }
+  input.value = raw;
+  const item = document.getElementById('rolepanel-item-' + oldId); if (item) item.id = 'rolepanel-item-' + raw;
+  const hintEl = document.getElementById('rolepanel-id-hint-' + oldId); if (hintEl) { hintEl.id = 'rolepanel-id-hint-' + raw; hintEl.textContent = `Used as: /setuprolepanel panel:${raw}`; hintEl.style.color = ''; }
+  const optsEl = document.getElementById('rolepanel-options-' + oldId); if (optsEl) optsEl.id = 'rolepanel-options-' + raw;
+  const newItem = document.getElementById('rolepanel-item-' + raw);
+  if (newItem) { const hc = newItem.querySelector('.panel-header-id code'); if (hc) hc.textContent = raw; }
+  p.id = raw;
+}
+```
+
+## 4. Hook into loadDashboard() - add this inside the function
+
+Add this block inside `async function loadDashboard()`, right after the `appPanels = ...; buildAppPanels();` lines:
+
+```javascript
+    const rs = cfg.roleSystems || { autoroles: { enabled: false, roleIds: [] }, panels: [] };
+    autoroleEnabled = !!rs.autoroles?.enabled;
+    autoroleIds = rs.autoroles?.roleIds || [];
+    document.getElementById('autorole-master').checked = autoroleEnabled;
+    document.getElementById('autorole-ids').value = autoroleIds.join(', ');
+    toggleAutoroleMaster();
+
+    rolePanels = Array.isArray(rs.panels) ? rs.panels.map(p => ({ ...p, options: p.options || [] })) : [];
+    buildRolePanels();
+```
+
+## 5. Hook into saveAll() - validation + payload
+
+Add this validation block inside `async function saveAll()`, anywhere before the `const body = {` line:
+
+```javascript
+  rolePanels.forEach(p => syncRoleOptionsFromDom(p.id));
+
+  const rpIds = rolePanels.map(p => p.id.trim().toLowerCase());
+  if (rpIds.length !== new Set(rpIds).size) { showToast('Role panel IDs must be unique', true); btn.disabled = false; btn.textContent = 'Save Changes'; return; }
+  for (const p of rolePanels) {
+    if (!p.id.trim()) { showToast('Each role panel must have an ID', true); btn.disabled = false; btn.textContent = 'Save Changes'; return; }
+    const validOptions = (p.options || []).filter(o => o.roleId && o.roleId.trim());
+    if (validOptions.length === 0) { showToast(`Role panel "${p.title || p.id}" needs at least one option with a role ID`, true); btn.disabled = false; btn.textContent = 'Save Changes'; return; }
+    for (const o of p.options || []) {
+      if (o.roleId && !/^\d{5,25}$/.test(o.roleId.trim())) { showToast(`Role panel "${p.title || p.id}" has an invalid role ID in one of its options`, true); btn.disabled = false; btn.textContent = 'Save Changes'; return; }
+    }
+    if (p.type === 'reaction') {
+      const missingEmoji = (p.options || []).some(o => o.roleId && o.roleId.trim() && !(o.emoji || '').trim());
+      if (missingEmoji) { showToast(`Role panel "${p.title || p.id}" is a Reaction panel — every option needs an emoji`, true); btn.disabled = false; btn.textContent = 'Save Changes'; return; }
+    }
+  }
+
+  const autoroleIdsInput = document.getElementById('autorole-ids').value.split(',').map(s => s.trim()).filter(Boolean);
+  if (autoroleIdsInput.some(id => !/^\d{5,25}$/.test(id))) { showToast('One of the autorole IDs looks invalid', true); btn.disabled = false; btn.textContent = 'Save Changes'; return; }
+
+  const cleanRolePanels = rolePanels.map(p => ({
+    id: p.id.trim().toLowerCase(),
+    type: p.type,
+    title: (p.title || '').trim() || '🎭 Role Selection',
+    description: (p.description || '').trim(),
+    color: p.color || '#5865f2',
+    multiSelect: !!p.multiSelect,
+    placeholder: (p.placeholder || '').trim() || 'Select your roles',
+    options: (p.options || [])
+      .filter(o => o.roleId && o.roleId.trim())
+      .map((o, i) => ({
+        id: o.id || `opt${i}`,
+        label: (o.label || '').trim() || 'Role',
+        roleId: o.roleId.trim(),
+        emoji: (o.emoji || '').trim(),
+        description: (o.description || '').trim(),
+      })),
+  }));
+```
+
+Then add this property to the existing `const body = { ... }` object (anywhere inside it, e.g. right after `socialNotifications: cleanSocial,`):
+
+```javascript
+    roleSystems: {
+      autoroles: { enabled: document.getElementById('autorole-master').checked, roleIds: autoroleIdsInput },
+      panels: cleanRolePanels,
+    },
+```
+
+That completes the dashboard integration. Saving will validate role IDs, require at least one valid option per panel, and require emojis on every option for reaction-type panels (since Discord needs an emoji to react with).

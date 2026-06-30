@@ -21,7 +21,20 @@ const {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
+  StringSelectMenuBuilder,
 } = require('discord.js');
+
+const {
+  initRoleSystems,
+  getRolePanelList,
+  getRolePanel,
+  handleAutorole,
+  postRolePanel,
+  saveRolePanelMessageId,
+  handleRoleSystemInteraction,
+  handleReactionAdd,
+  handleReactionRemove,
+} = require('./roleSystems');
 
 const OpenAI = require('openai');
 const {
@@ -178,8 +191,9 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildModeration,
     GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMessageReactions,
   ],
-  partials: [Partials.Channel, Partials.Message, Partials.GuildMember]
+  partials: [Partials.Channel, Partials.Message, Partials.GuildMember, Partials.Reaction]
 });
 process.on('unhandledRejection', (err) => {
   console.error('[UnhandledRejection]', err);
@@ -323,6 +337,9 @@ const LOG_COLORS = {
 client.on('guildMemberAdd', async (member) => {
   const event = { type: 'join', userId: member.id, username: member.user.tag, detail: `Account created: <t:${Math.floor(member.user.createdTimestamp / 1000)}:R>` };
   await pushLogEvent(member.guild.id, event);
+
+  await handleAutorole(member);
+
   if (isLogEventEnabled(member.guild.id, 'join')) {
     const embed = new EmbedBuilder()
       .setColor(LOG_COLORS.join).setTitle('📥 Member Joined')
@@ -1184,6 +1201,21 @@ const commands = [
   new SlashCommandBuilder()
     .setName('vote').setDescription('Vote for JARVIS on top.gg and earn 30 days of free Premium for your server!')
     .setDMPermission(true),
+  new SlashCommandBuilder()
+    .setName('setuprolepanel').setDescription('Post a role panel (button/dropdown/reaction) in this channel (admin only)')
+    .addStringOption(o => o.setName('panel').setDescription('Role panel ID to post').setRequired(true))
+    .setDMPermission(false),
+  new SlashCommandBuilder().setName('listrolepanels').setDescription('List all role panels configured for this server').setDMPermission(false),
+  new SlashCommandBuilder()
+    .setName('autorole').setDescription('Manage autoroles (roles given automatically when someone joins)')
+    .addSubcommand(sub => sub.setName('add').setDescription('Add a role to autoroles')
+      .addRoleOption(o => o.setName('role').setDescription('Role to auto-assign on join').setRequired(true)))
+    .addSubcommand(sub => sub.setName('remove').setDescription('Remove a role from autoroles')
+      .addRoleOption(o => o.setName('role').setDescription('Role to remove from autoroles').setRequired(true)))
+    .addSubcommand(sub => sub.setName('list').setDescription('List current autoroles'))
+    .addSubcommand(sub => sub.setName('toggle').setDescription('Enable or disable autoroles entirely')
+      .addBooleanOption(o => o.setName('enabled').setDescription('Turn autoroles on or off').setRequired(true)))
+    .setDMPermission(false),
 ].map(c => c.toJSON());
 
 // =========================
@@ -1202,6 +1234,8 @@ async function deployCommands() {
 client.once('clientReady', async () => {
   await loadMemory();
   await loadDashboardConfig();
+
+  initRoleSystems(client, redis, () => dashboardConfig);
 
   client.user.setPresence({
     activities: [{ name: "Join discord.gg/5NtU3eFBrM" }],
@@ -1289,6 +1323,9 @@ client.on('guildCreate', async (guild) => {
 // INTERACTIONS
 // =========================
 client.on('interactionCreate', async (interaction) => {
+
+  // ── Role panel buttons/dropdowns ────────────────────────────────
+  if (await handleRoleSystemInteraction(interaction)) return;
 
   // ── Trivia buttons ─────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId.startsWith('trivia_')) {
@@ -1892,6 +1929,9 @@ client.on('interactionCreate', async (interaction) => {
 /listapplications - list all application panels
 /giveaway start/end/reroll - giveaways
 /vote - vote on top.gg for free Premium
+/autorole add/remove/list/toggle - manage join autoroles
+/setuprolepanel [panel] - post a button/dropdown/reaction role panel
+/listrolepanels - list all configured role panels
 /feedback /reviews /invite /portfolio /websites /dashboard
 /broadcast - owner: send message to all servers
 `)]
@@ -2450,6 +2490,74 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
+  // ── /setuprolepanel ───────────────────────────────────────────
+  if (interaction.commandName === 'setuprolepanel') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    if (!interaction.member.permissions.has('ManageRoles')) return interaction.reply({ content: '❌ You need **Manage Roles** permission.', flags: 64 });
+    const panelId = interaction.options.getString('panel');
+    const panel = getRolePanel(interaction.guild.id, panelId);
+    if (!panel) return interaction.reply({ content: `❌ No role panel found with ID \`${panelId}\`. Create one in the dashboard first.`, flags: 64 });
+    if (!panel.options || panel.options.length === 0) return interaction.reply({ content: '❌ This panel has no role options configured yet.', flags: 64 });
+
+    try {
+      const msg = await postRolePanel(interaction.channel, panel);
+      const updatedCfg = await saveRolePanelMessageId(interaction.guild.id, panel.id, interaction.channel.id, msg.id);
+      await saveDashboardConfig(updatedCfg);
+      return interaction.reply({ content: `✅ Role panel **${panel.title || panel.id}** posted! (${panel.type})`, flags: 64 });
+    } catch (err) {
+      console.error('[RolePanel] setup failed:', err);
+      return interaction.reply({ content: '❌ Failed to post role panel. Make sure I have permission to send messages and manage roles, and that my role is positioned above the roles you want to assign.', flags: 64 });
+    }
+  }
+
+  // ── /listrolepanels ────────────────────────────────────────────
+  if (interaction.commandName === 'listrolepanels') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    const panelList = getRolePanelList(interaction.guild.id);
+    if (panelList.length === 0) return interaction.reply({ content: '❌ No role panels configured. Use the dashboard to create one first.', flags: 64 });
+    const typeEmoji = { button: '🔘', dropdown: '📋', reaction: '😀' };
+    const lines = panelList.map(p => {
+      const posted = p.messageId ? `Posted in <#${p.channelId}>` : '⚠️ Not posted yet';
+      return `${typeEmoji[p.type] || '🎭'} **${p.title || p.id}** — ID: \`${p.id}\` (${p.type})\n  ${posted} • ${p.options?.length || 0} option(s)\n  Post with: \`/setuprolepanel panel:${p.id}\``;
+    }).join('\n\n');
+    return interaction.reply({ embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('🎭 Role Panels').setDescription(lines).setFooter({ text: `${panelList.length} panel(s) configured • JARVIS Role Systems` }).setTimestamp()], flags: 64 });
+  }
+
+  // ── /autorole ──────────────────────────────────────────────────
+  if (interaction.commandName === 'autorole') {
+    if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
+    if (!interaction.member.permissions.has('ManageRoles')) return interaction.reply({ content: '❌ You need **Manage Roles** permission.', flags: 64 });
+    const sub = interaction.options.getSubcommand();
+
+    dashboardConfig.roleSystems = dashboardConfig.roleSystems || {};
+    dashboardConfig.roleSystems[interaction.guild.id] = dashboardConfig.roleSystems[interaction.guild.id] || { autoroles: { enabled: false, roleIds: [] }, panels: [] };
+    const rsConfig = dashboardConfig.roleSystems[interaction.guild.id];
+    rsConfig.autoroles = rsConfig.autoroles || { enabled: false, roleIds: [] };
+
+    if (sub === 'add') {
+      const role = interaction.options.getRole('role');
+      if (!rsConfig.autoroles.roleIds.includes(role.id)) rsConfig.autoroles.roleIds.push(role.id);
+      await saveDashboardConfig(dashboardConfig);
+      return interaction.reply(`✅ <@&${role.id}> added to autoroles. New members will receive it automatically${rsConfig.autoroles.enabled ? '.' : ' once autoroles are enabled (`/autorole toggle enabled:true`).'}`);
+    }
+    if (sub === 'remove') {
+      const role = interaction.options.getRole('role');
+      rsConfig.autoroles.roleIds = rsConfig.autoroles.roleIds.filter(id => id !== role.id);
+      await saveDashboardConfig(dashboardConfig);
+      return interaction.reply(`✅ <@&${role.id}> removed from autoroles.`);
+    }
+    if (sub === 'list') {
+      const list = rsConfig.autoroles.roleIds.map(id => `<@&${id}>`).join(', ') || 'None configured';
+      return interaction.reply({ content: `🎭 **Autoroles** (${rsConfig.autoroles.enabled ? '🟢 enabled' : '🔴 disabled'}):\n${list}`, flags: 64 });
+    }
+    if (sub === 'toggle') {
+      const enabled = interaction.options.getBoolean('enabled');
+      rsConfig.autoroles.enabled = enabled;
+      await saveDashboardConfig(dashboardConfig);
+      return interaction.reply(`✅ Autoroles are now **${enabled ? 'enabled' : 'disabled'}**.`);
+    }
+  }
+
   // ── Games ──────────────────────────────────────────────────────
   if (interaction.commandName === 'rps') {
     const choices = ['rock', 'paper', 'scissors'];
@@ -2555,6 +2663,17 @@ client.on('interactionCreate', async (interaction) => {
     const row2 = new ActionRowBuilder().addComponents([6, 7, 8, 9].map(n => new ButtonBuilder().setCustomId(`ttt_${interaction.user.id}_${n}`).setLabel(`${n}`).setStyle(ButtonStyle.Secondary)));
     return interaction.reply({ content: `❌ **Tic Tac Toe** — You are ❌, JARVIS is ⭕\n\n${renderBoard(memory[gameKey].board)}\n\nPick a square:`, components: [row, row2] });
   }
+});
+
+// =========================
+// REACTION ROLE EVENTS
+// =========================
+client.on('messageReactionAdd', async (reaction, user) => {
+  await handleReactionAdd(reaction, user);
+});
+
+client.on('messageReactionRemove', async (reaction, user) => {
+  await handleReactionRemove(reaction, user);
 });
 
 // =========================
