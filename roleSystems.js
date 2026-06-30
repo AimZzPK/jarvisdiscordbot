@@ -78,17 +78,18 @@ function buildPanelEmbed(panel) {
 function buildPanelComponents(panel) {
   const options = (panel.options || []).filter(o => o.roleId);
 
-  if (panel.type === 'button') {
+if (panel.type === 'button') {
     const rows = [];
     for (let i = 0; i < options.slice(0, 25).length; i += 5) {
       const row = new ActionRowBuilder().addComponents(
-        options.slice(i, i + 5).map(o =>
-          new ButtonBuilder()
+        options.slice(i, i + 5).map(o => {
+          const btn = new ButtonBuilder()
             .setCustomId(`rolepanel_btn__${panel.id}__${o.roleId}`)
             .setLabel(o.label || 'Role')
-            .setEmoji(o.emoji && o.emoji.trim() ? o.emoji.trim() : undefined)
-            .setStyle(ButtonStyle.Secondary)
-        )
+            .setStyle(ButtonStyle.Secondary);
+          if (o.emoji && o.emoji.trim()) btn.setEmoji(o.emoji.trim());
+          return btn;
+        })
       );
       rows.push(row);
     }
@@ -102,12 +103,15 @@ function buildPanelComponents(panel) {
       .setMinValues(0)
       .setMaxValues(panel.multiSelect ? Math.max(1, options.length) : 1)
       .addOptions(
-        options.slice(0, 25).map(o => ({
-          label: (o.label || 'Role').slice(0, 100),
-          value: o.roleId,
-          description: o.description ? o.description.slice(0, 100) : undefined,
-          emoji: o.emoji && o.emoji.trim() ? o.emoji.trim() : undefined,
-        }))
+        options.slice(0, 25).map(o => {
+          const opt = {
+            label: (o.label || 'Role').slice(0, 100),
+            value: o.roleId,
+          };
+          if (o.description) opt.description = o.description.slice(0, 100);
+          if (o.emoji && o.emoji.trim()) opt.emoji = o.emoji.trim();
+          return opt;
+        })
       );
     return [new ActionRowBuilder().addComponents(menu)];
   }
