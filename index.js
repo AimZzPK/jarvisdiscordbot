@@ -52,6 +52,9 @@ const { execSync } = require('child_process');
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 const FormData = require('form-data');
 
+// NEW: engagement pack (leveling, economy, birthdays, rep, starboard)
+const jarvisEngagement = require('./jarvis-engagement');
+
 // =========================
 // RATE LIMITING
 // =========================
@@ -1216,7 +1219,9 @@ const commands = [
     .addSubcommand(sub => sub.setName('toggle').setDescription('Enable or disable autoroles entirely')
       .addBooleanOption(o => o.setName('enabled').setDescription('Turn autoroles on or off').setRequired(true)))
     .setDMPermission(false),
-].map(c => c.toJSON());
+].map(c => c.toJSON())
+ // NEW: merge in the engagement pack's slash commands (leveling, economy, birthdays, rep, starboard)
+ .concat(jarvisEngagement.commands.map(c => c.data.toJSON()));
 
 // =========================
 // DEPLOY COMMANDS
@@ -1236,6 +1241,7 @@ client.once('clientReady', async () => {
   await loadDashboardConfig();
 
   initRoleSystems(client, redis, () => dashboardConfig);
+jarvisEngagement.initLevelRoles(() => dashboardConfig, saveDashboardConfig); // NEW
 
   client.user.setPresence({
     activities: [{ name: "Join discord.gg/5NtU3eFBrM" }],
@@ -1247,6 +1253,9 @@ client.once('clientReady', async () => {
   setInterval(loadDashboardConfig, 15_000);
 
   initSocialNotifications(client, redis, () => dashboardConfig, EmbedBuilder);
+
+  // NEW: start the birthday scheduler from the engagement pack
+  jarvisEngagement.startBirthdayScheduler(client);
 
   const voiceDeps = {
     groq,
@@ -1628,6 +1637,22 @@ client.on('interactionCreate', async (interaction) => {
 
   if (!interaction.isChatInputCommand()) return;
 
+  // ── NEW: engagement pack commands (leveling, economy, birthdays, rep, starboard) ──
+  const engagementCmd = jarvisEngagement.commands.find(c => c.data.name === interaction.commandName);
+  if (engagementCmd) {
+    try {
+      await engagementCmd.execute(interaction);
+    } catch (err) {
+      console.error('[Engagement]', err);
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply({ content: '❌ Something went wrong.' }).catch(() => {});
+      } else {
+        await interaction.reply({ content: '❌ Something went wrong.', flags: 64 }).catch(() => {});
+      }
+    }
+    return;
+  }
+
   // ── /giveaway ──────────────────────────────────────────────────
   if (interaction.commandName === 'giveaway') {
     if (!interaction.guild) return interaction.reply({ content: '❌ Server only', flags: 64 });
@@ -1932,6 +1957,9 @@ client.on('interactionCreate', async (interaction) => {
 /autorole add/remove/list/toggle - manage join autoroles
 /setuprolepanel [panel] - post a button/dropdown/reaction role panel
 /listrolepanels - list all configured role panels
+/rank /levelboard /setlevelrole - leveling & XP
+/balance /daily /work /pay /shop /gamble - economy
+/birthday /rep /starboard - social features
 /feedback /reviews /invite /portfolio /websites /dashboard
 /broadcast - owner: send message to all servers
 `)]
@@ -2670,6 +2698,8 @@ client.on('interactionCreate', async (interaction) => {
 // =========================
 client.on('messageReactionAdd', async (reaction, user) => {
   await handleReactionAdd(reaction, user);
+  // NEW: starboard reaction handling
+  await jarvisEngagement.handleStarboardReaction(reaction, user);
 });
 
 client.on('messageReactionRemove', async (reaction, user) => {
@@ -2682,6 +2712,8 @@ client.on('messageReactionRemove', async (reaction, user) => {
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   await handleAutomod(message);
+  // NEW: leveling/XP tracking
+  await jarvisEngagement.handleLevelingMessage(message);
   const content = message.content;
   const lower = content.toLowerCase();
   const isDM = message.guild === null;
