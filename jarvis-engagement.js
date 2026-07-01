@@ -488,10 +488,10 @@ async function handleStarboardReaction(reaction, user) {
 // ============================================================================
 
 module.exports = {
-  commands,
+  commands: [],
   handleLevelingMessage,
   handleStarboardReaction,
   startBirthdayScheduler,
-  initLevelRoles, // NEW — call once at boot
+  initLevelRoles,
   CONFIG,
 };
