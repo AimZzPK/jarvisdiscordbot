@@ -1,4 +1,3 @@
-// redis.js
 const { Redis } = require('@upstash/redis');
 
 const redis = Redis.fromEnv();

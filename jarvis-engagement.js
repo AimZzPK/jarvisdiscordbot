@@ -33,27 +33,21 @@ const REDIS = require('./redis'); // <-- point this at your actual redis client 
 // ============================================================================
 // STORAGE HELPERS
 // ============================================================================
+// NOTE: @upstash/redis auto-serializes/deserializes JSON on get/set,
+// so we do NOT JSON.parse/JSON.stringify manually here.
 
 async function getJSON(key, fallback = null) {
-  const raw = await REDIS.get(key);
-  if (!raw) return fallback;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return fallback;
-  }
+  const val = await REDIS.get(key);
+  return val ?? fallback;
 }
 
 async function setJSON(key, value) {
-  return REDIS.set(key, JSON.stringify(value));
+  return REDIS.set(key, value);
 }
 
 // ============================================================================
 // LEVELING / XP
 // ============================================================================
-
-
-
 
 const CONFIG = {
   currency: '🪙',
@@ -71,6 +65,7 @@ const CONFIG = {
 };
 
 const xpKey = (g, u) => `xp:${g}:${u}`;
+const levelRolesKey = (g) => `levelroles:${g}`;
 
 function xpForLevel(level) {
   return 5 * level ** 2 + 50 * level + 100;
@@ -108,46 +103,15 @@ async function getLeaderboard(guildId, limit = 10) {
   return entries.sort((a, b) => b.xp - a.xp).slice(0, limit);
 }
 
-// ============================================================================
-// LEVEL ROLES (dashboardConfig source of truth)
-// ============================================================================
-
-let getDashboardConfig = () => ({});
-let saveDashboardConfigFn = async () => {};
-
-function initLevelRoles(getConfigFn, saveConfigFn) {
-  getDashboardConfig = getConfigFn;
-  saveDashboardConfigFn = saveConfigFn;
-}
-
-function getLevelRoles(guildId) {
-  const config = getDashboardConfig();
-  return config.levelRoles?.[guildId] || {};
+async function getLevelRoles(guildId) {
+  return getJSON(levelRolesKey(guildId), {});
 }
 
 async function setLevelRole(guildId, level, roleId) {
-  const config = {
-    ...getDashboardConfig(),
-    levelRoles: {
-      ...(getDashboardConfig().levelRoles || {})
-    }
-  };
-
-  config.levelRoles[guildId] = {
-    ...(config.levelRoles[guildId] || {})
-  };
-
-  const key = String(level);
-
-  if (roleId === null) {
-    delete config.levelRoles[guildId][key];
-  } else {
-    config.levelRoles[guildId][key] = roleId;
-  }
-
-  await saveDashboardConfigFn(config);
-
-  return config.levelRoles[guildId];
+  const roles = await getLevelRoles(guildId);
+  roles[String(level)] = roleId;
+  await setJSON(levelRolesKey(guildId), roles);
+  return roles;
 }
 
 const xpCooldowns = new Map();
@@ -484,14 +448,463 @@ async function handleStarboardReaction(reaction, user) {
 }
 
 // ============================================================================
+// SLASH COMMANDS
+// ============================================================================
+
+function formatMs(ms) {
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  return `${h}h ${m}m`;
+}
+
+const commands = [
+  // --- /rank ---
+  {
+    data: new SlashCommandBuilder()
+      .setName('rank')
+      .setDescription("Check your (or someone else's) level and XP")
+      .addUserOption((opt) => opt.setName('user').setDescription('User to check').setRequired(false)),
+    async execute(interaction) {
+      const target = interaction.options.getUser('user') || interaction.user;
+      const data = await getUserXp(interaction.guild.id, target.id);
+      const nextLevelXp = xpForLevel(data.level + 1);
+      const currentLevelXp = xpForLevel(data.level);
+      const progress = data.xp - currentLevelXp;
+      const needed = nextLevelXp - currentLevelXp;
+      const barLength = 20;
+      const filled = Math.round((progress / needed) * barLength);
+      const bar = '█'.repeat(filled) + '░'.repeat(barLength - filled);
+
+      const embed = new EmbedBuilder()
+        .setColor(0x5865f2)
+        .setAuthor({ name: target.username, iconURL: target.displayAvatarURL() })
+        .setTitle(`Level ${data.level}`)
+        .setDescription(`${bar}\n${progress} / ${needed} XP to next level`)
+        .setFooter({ text: `Total XP: ${data.xp}` });
+
+      await interaction.reply({ embeds: [embed] });
+    },
+  },
+
+  // --- /levelboard ---
+  {
+    data: new SlashCommandBuilder().setName('levelboard').setDescription('Show the server XP leaderboard'),
+    async execute(interaction) {
+      await interaction.deferReply();
+      const top = await getLeaderboard(interaction.guild.id, 10);
+      if (!top.length) return interaction.editReply('No one has earned XP yet.');
+
+      const lines = await Promise.all(
+        top.map(async (entry, i) => {
+          const member = await interaction.guild.members.fetch(entry.userId).catch(() => null);
+          const name = member ? member.user.username : `Unknown (${entry.userId})`;
+          const medal = ['🥇', '🥈', '🥉'][i] || `${i + 1}.`;
+          return `${medal} **${name}** — Level ${entry.level} (${entry.xp} XP)`;
+        })
+      );
+
+      const embed = new EmbedBuilder()
+        .setColor(0x5865f2)
+        .setTitle(`🏆 ${interaction.guild.name} Leaderboard`)
+        .setDescription(lines.join('\n'));
+
+      await interaction.editReply({ embeds: [embed] });
+    },
+  },
+
+  // --- /setlevelrole ---
+  {
+    data: new SlashCommandBuilder()
+      .setName('setlevelrole')
+      .setDescription('Assign a role reward for reaching a level')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
+      .addIntegerOption((opt) => opt.setName('level').setDescription('Level required').setRequired(true).setMinValue(1))
+      .addRoleOption((opt) => opt.setName('role').setDescription('Role to grant').setRequired(true)),
+    async execute(interaction) {
+      const level = interaction.options.getInteger('level');
+      const role = interaction.options.getRole('role');
+
+      if (role.managed || role.id === interaction.guild.id) {
+        return interaction.reply({ content: "I can't assign that role.", ephemeral: true });
+      }
+
+      const roles = await setLevelRole(interaction.guild.id, level, role.id);
+      const embed = new EmbedBuilder()
+        .setColor(0x57f287)
+        .setTitle('Level role set')
+        .setDescription(
+          `Members reaching **Level ${level}** will now receive ${role}.\n\nCurrent mappings:\n` +
+            Object.entries(roles)
+              .sort((a, b) => Number(a[0]) - Number(b[0]))
+              .map(([lvl, roleId]) => `• Level ${lvl} → <@&${roleId}>`)
+              .join('\n')
+        );
+
+      await interaction.reply({ embeds: [embed] });
+    },
+  },
+
+  // --- /balance ---
+  {
+    data: new SlashCommandBuilder()
+      .setName('balance')
+      .setDescription("Check your (or someone else's) balance")
+      .addUserOption((opt) => opt.setName('user').setDescription('User to check').setRequired(false)),
+    async execute(interaction) {
+      const target = interaction.options.getUser('user') || interaction.user;
+      const wallet = await getWallet(interaction.guild.id, target.id);
+      const embed = new EmbedBuilder()
+        .setColor(0xfee75c)
+        .setAuthor({ name: target.username, iconURL: target.displayAvatarURL() })
+        .setDescription(`${CONFIG.currency} **${wallet.balance.toLocaleString()}**`);
+      await interaction.reply({ embeds: [embed] });
+    },
+  },
+
+  // --- /daily ---
+  {
+    data: new SlashCommandBuilder().setName('daily').setDescription('Claim your daily reward'),
+    async execute(interaction) {
+      const result = await claimDaily(interaction.guild.id, interaction.user.id);
+      if (!result.success) {
+        return interaction.reply({
+          content: `⏳ You already claimed today. Come back in **${formatMs(result.msRemaining)}**.`,
+          ephemeral: true,
+        });
+      }
+      const embed = new EmbedBuilder()
+        .setColor(0xfee75c)
+        .setTitle('Daily reward claimed!')
+        .setDescription(
+          `You received ${CONFIG.currency} **${result.reward}**\n🔥 Streak: **${result.streak}** day(s)\n\nNew balance: ${CONFIG.currency} ${result.wallet.balance.toLocaleString()}`
+        );
+      await interaction.reply({ embeds: [embed] });
+    },
+  },
+
+  // --- /work ---
+  {
+    data: new SlashCommandBuilder().setName('work').setDescription('Work a shift to earn some coins'),
+    async execute(interaction) {
+      const result = await workShift(interaction.guild.id, interaction.user.id);
+      if (!result.success) {
+        return interaction.reply({
+          content: `⏳ You're tired. Rest for **${formatMs(result.msRemaining)}** before working again.`,
+          ephemeral: true,
+        });
+      }
+      const jobs = [
+        'fixed a bug in production',
+        'debugged JARVIS at 3am',
+        'moderated a heated chat',
+        'streamed on Twitch',
+        'wrote a Discord bot command',
+        'answered support tickets',
+      ];
+      const job = jobs[Math.floor(Math.random() * jobs.length)];
+      const embed = new EmbedBuilder()
+        .setColor(0xfee75c)
+        .setDescription(
+          `You ${job} and earned ${CONFIG.currency} **${result.earnings}**\n\nNew balance: ${CONFIG.currency} ${result.wallet.balance.toLocaleString()}`
+        );
+      await interaction.reply({ embeds: [embed] });
+    },
+  },
+
+  // --- /pay ---
+  {
+    data: new SlashCommandBuilder()
+      .setName('pay')
+      .setDescription('Send coins to another user')
+      .addUserOption((opt) => opt.setName('user').setDescription('Who to pay').setRequired(true))
+      .addIntegerOption((opt) => opt.setName('amount').setDescription('Amount to send').setRequired(true).setMinValue(1)),
+    async execute(interaction) {
+      const target = interaction.options.getUser('user');
+      const amount = interaction.options.getInteger('amount');
+
+      if (target.id === interaction.user.id) return interaction.reply({ content: "You can't pay yourself.", ephemeral: true });
+      if (target.bot) return interaction.reply({ content: "You can't pay a bot.", ephemeral: true });
+
+      const result = await payUser(interaction.guild.id, interaction.user.id, target.id, amount);
+      if (!result.success) {
+        return interaction.reply({ content: `❌ You don't have enough ${CONFIG.currency} to send that.`, ephemeral: true });
+      }
+
+      const embed = new EmbedBuilder()
+        .setColor(0x57f287)
+        .setDescription(`${interaction.user} paid ${target} ${CONFIG.currency} **${amount.toLocaleString()}**`);
+      await interaction.reply({ embeds: [embed] });
+    },
+  },
+
+  // --- /shop ---
+  {
+    data: new SlashCommandBuilder()
+      .setName('shop')
+      .setDescription('Browse and buy items from the server shop')
+      .addSubcommand((sub) => sub.setName('view').setDescription('View shop items'))
+      .addSubcommand((sub) =>
+        sub.setName('buy').setDescription('Buy an item by its ID').addStringOption((opt) => opt.setName('id').setDescription('Item ID').setRequired(true))
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName('additem')
+          .setDescription('(Admin) Add an item to the shop')
+          .addStringOption((opt) => opt.setName('name').setDescription('Item name').setRequired(true))
+          .addIntegerOption((opt) => opt.setName('price').setDescription('Price in coins').setRequired(true).setMinValue(1))
+          .addRoleOption((opt) => opt.setName('role').setDescription('Role granted on purchase (optional)').setRequired(false))
+          .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+      ),
+    async execute(interaction) {
+      const sub = interaction.options.getSubcommand();
+      const guildId = interaction.guild.id;
+
+      if (sub === 'view') {
+        const items = await getShop(guildId);
+        if (!items.length) return interaction.reply('The shop is empty. Ask an admin to add items with `/shop additem`.');
+        const embed = new EmbedBuilder()
+          .setColor(0xfee75c)
+          .setTitle('🛒 Server Shop')
+          .setDescription(items.map((i) => `**${i.name}** — ${CONFIG.currency} ${i.price.toLocaleString()}\n\`ID: ${i.id}\``).join('\n\n'));
+        return interaction.reply({ embeds: [embed] });
+      }
+
+      if (sub === 'buy') {
+        const id = interaction.options.getString('id');
+        const result = await buyItem(guildId, interaction.user.id, id);
+        if (!result.success) {
+          const msg = result.reason === 'not_found' ? 'Item not found.' : `You don't have enough ${CONFIG.currency}.`;
+          return interaction.reply({ content: `❌ ${msg}`, ephemeral: true });
+        }
+        if (result.item.roleId) {
+          const role = interaction.guild.roles.cache.get(result.item.roleId);
+          if (role) await interaction.member.roles.add(role).catch(() => {});
+        }
+        return interaction.reply(`✅ You bought **${result.item.name}**!`);
+      }
+
+      if (sub === 'additem') {
+        const name = interaction.options.getString('name');
+        const price = interaction.options.getInteger('price');
+        const role = interaction.options.getRole('role');
+        const item = { id: randomUUID().slice(0, 8), name, price, roleId: role ? role.id : null };
+        await addShopItem(guildId, item);
+        return interaction.reply(`✅ Added **${name}** (${CONFIG.currency} ${price}) to the shop. ID: \`${item.id}\``);
+      }
+    },
+  },
+
+  // --- /gamble ---
+  {
+    data: new SlashCommandBuilder()
+      .setName('gamble')
+      .setDescription('Try your luck')
+      .addSubcommand((sub) =>
+        sub
+          .setName('coinflip')
+          .setDescription('Bet on a coin flip')
+          .addIntegerOption((opt) => opt.setName('amount').setDescription('Amount to bet').setRequired(true).setMinValue(1))
+          .addStringOption((opt) =>
+            opt
+              .setName('choice')
+              .setDescription('Heads or tails')
+              .setRequired(true)
+              .addChoices({ name: 'Heads', value: 'heads' }, { name: 'Tails', value: 'tails' })
+          )
+      )
+      .addSubcommand((sub) =>
+        sub.setName('slots').setDescription('Spin the slot machine').addIntegerOption((opt) => opt.setName('amount').setDescription('Amount to bet').setRequired(true).setMinValue(1))
+      ),
+    async execute(interaction) {
+      const sub = interaction.options.getSubcommand();
+      const amount = interaction.options.getInteger('amount');
+      const guildId = interaction.guild.id;
+      const userId = interaction.user.id;
+
+      if (sub === 'coinflip') {
+        const choice = interaction.options.getString('choice');
+        const result = await coinflip(guildId, userId, amount, choice);
+        if (!result.success) return interaction.reply({ content: `❌ You don't have enough ${CONFIG.currency}.`, ephemeral: true });
+
+        const embed = new EmbedBuilder()
+          .setColor(result.won ? 0x57f287 : 0xed4245)
+          .setDescription(
+            `The coin landed on **${result.result}**.\n` +
+              (result.won ? `You won ${CONFIG.currency} **${amount}**!` : `You lost ${CONFIG.currency} **${amount}**.`) +
+              `\n\nNew balance: ${CONFIG.currency} ${result.wallet.balance.toLocaleString()}`
+          );
+        return interaction.reply({ embeds: [embed] });
+      }
+
+      if (sub === 'slots') {
+        const result = await slots(guildId, userId, amount);
+        if (!result.success) return interaction.reply({ content: `❌ You don't have enough ${CONFIG.currency}.`, ephemeral: true });
+
+        const embed = new EmbedBuilder()
+          .setColor(result.net > 0 ? 0x57f287 : 0xed4245)
+          .setTitle('🎰 Slots')
+          .setDescription(
+            `[ ${result.reels.join(' | ')} ]\n\n` +
+              (result.net > 0
+                ? `You won ${CONFIG.currency} **${result.net}**!`
+                : result.net === 0
+                ? "Break even — you didn't lose anything extra."
+                : `You lost ${CONFIG.currency} **${Math.abs(result.net)}**.`) +
+              `\n\nNew balance: ${CONFIG.currency} ${result.wallet.balance.toLocaleString()}`
+          );
+        return interaction.reply({ embeds: [embed] });
+      }
+    },
+  },
+
+  // --- /birthday ---
+  {
+    data: new SlashCommandBuilder()
+      .setName('birthday')
+      .setDescription('Manage birthdays')
+      .addSubcommand((sub) =>
+        sub
+          .setName('set')
+          .setDescription('Set your birthday')
+          .addIntegerOption((opt) => opt.setName('month').setDescription('Month (1-12)').setRequired(true).setMinValue(1).setMaxValue(12))
+          .addIntegerOption((opt) => opt.setName('day').setDescription('Day (1-31)').setRequired(true).setMinValue(1).setMaxValue(31))
+      )
+      .addSubcommand((sub) => sub.setName('remove').setDescription('Remove your birthday'))
+      .addSubcommand((sub) => sub.setName('list').setDescription('List all upcoming birthdays'))
+      .addSubcommand((sub) =>
+        sub
+          .setName('channel')
+          .setDescription('(Admin) Set the channel for birthday announcements')
+          .addChannelOption((opt) => opt.setName('channel').setDescription('Announcement channel').addChannelTypes(ChannelType.GuildText).setRequired(true))
+          .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+      ),
+    async execute(interaction) {
+      const sub = interaction.options.getSubcommand();
+      const guildId = interaction.guild.id;
+
+      if (sub === 'set') {
+        const month = interaction.options.getInteger('month');
+        const day = interaction.options.getInteger('day');
+        const mmdd = `${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+        await setBirthday(guildId, interaction.user.id, mmdd);
+        return interaction.reply(`🎂 Birthday set to **${mmdd}**.`);
+      }
+
+      if (sub === 'remove') {
+        await removeBirthday(guildId, interaction.user.id);
+        return interaction.reply('🗑️ Your birthday has been removed.');
+      }
+
+      if (sub === 'list') {
+        const all = await getAllBirthdays(guildId);
+        const entries = Object.entries(all);
+        if (!entries.length) return interaction.reply('No birthdays set yet.');
+        const sorted = entries.sort((a, b) => a[1].localeCompare(b[1]));
+        const embed = new EmbedBuilder()
+          .setColor(0xeb459e)
+          .setTitle('🎂 Birthdays')
+          .setDescription(sorted.map(([userId, mmdd]) => `<@${userId}> — ${mmdd}`).join('\n'));
+        return interaction.reply({ embeds: [embed] });
+      }
+
+      if (sub === 'channel') {
+        const channel = interaction.options.getChannel('channel');
+        await setBirthdayChannel(guildId, channel.id);
+        return interaction.reply(`✅ Birthday announcements will be posted in ${channel}.`);
+      }
+    },
+  },
+
+  // --- /rep ---
+  {
+    data: new SlashCommandBuilder()
+      .setName('rep')
+      .setDescription('Give reputation to another user, or check reputation')
+      .addUserOption((opt) => opt.setName('user').setDescription('User to give rep to or check').setRequired(false)),
+    async execute(interaction) {
+      const target = interaction.options.getUser('user');
+      const guildId = interaction.guild.id;
+
+      if (!target) {
+        const rep = await getRep(guildId, interaction.user.id);
+        return interaction.reply(`⭐ You have **${rep}** reputation.`);
+      }
+
+      if (target.id === interaction.user.id) {
+        const rep = await getRep(guildId, target.id);
+        return interaction.reply({ content: `You can't give rep to yourself. You have **${rep}** rep.`, ephemeral: true });
+      }
+
+      if (target.bot) {
+        const rep = await getRep(guildId, target.id);
+        return interaction.reply(`⭐ ${target.username} has **${rep}** reputation.`);
+      }
+
+      const result = await giveRep(guildId, interaction.user.id, target.id);
+      if (!result.success) {
+        if (result.reason === 'cooldown') {
+          return interaction.reply({ content: `⏳ You can give rep again in **${formatMs(result.msRemaining)}**.`, ephemeral: true });
+        }
+        return interaction.reply({ content: '❌ Something went wrong.', ephemeral: true });
+      }
+
+      const embed = new EmbedBuilder()
+        .setColor(0xeb459e)
+        .setDescription(`⭐ ${interaction.user} gave a reputation point to ${target}! They now have **${result.newRep}** rep.`);
+      await interaction.reply({ embeds: [embed] });
+    },
+  },
+
+  // --- /starboard ---
+  {
+    data: new SlashCommandBuilder()
+      .setName('starboard')
+      .setDescription('Configure the starboard')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+      .addSubcommand((sub) =>
+        sub
+          .setName('setup')
+          .setDescription('Set the starboard channel and reaction threshold')
+          .addChannelOption((opt) => opt.setName('channel').setDescription('Channel to post starred messages').addChannelTypes(ChannelType.GuildText).setRequired(true))
+          .addIntegerOption((opt) => opt.setName('threshold').setDescription('Reactions needed (default 5)').setMinValue(1).setRequired(false))
+          .addStringOption((opt) => opt.setName('emoji').setDescription('Reaction emoji to track (default ⭐)').setRequired(false))
+      )
+      .addSubcommand((sub) => sub.setName('status').setDescription('Show current starboard config')),
+    async execute(interaction) {
+      const sub = interaction.options.getSubcommand();
+      const guildId = interaction.guild.id;
+
+      if (sub === 'setup') {
+        const channel = interaction.options.getChannel('channel');
+        const threshold = interaction.options.getInteger('threshold') ?? undefined;
+        const emoji = interaction.options.getString('emoji') ?? undefined;
+        const updates = { channelId: channel.id };
+        if (threshold !== undefined) updates.threshold = threshold;
+        if (emoji !== undefined) updates.emoji = emoji;
+        const cfg = await setStarboardConfig(guildId, updates);
+        return interaction.reply(`✅ Starboard set to ${channel} — messages need **${cfg.threshold}x ${cfg.emoji}** to be featured.`);
+      }
+
+      if (sub === 'status') {
+        const cfg = await getStarboardConfig(guildId);
+        const embed = new EmbedBuilder()
+          .setColor(0xfee75c)
+          .setTitle('⭐ Starboard Config')
+          .setDescription(cfg.channelId ? `Channel: <#${cfg.channelId}>\nThreshold: **${cfg.threshold}x ${cfg.emoji}**` : 'Starboard is not set up yet. Use `/starboard setup`.');
+        return interaction.reply({ embeds: [embed] });
+      }
+    },
+  },
+];
+
+// ============================================================================
 // EXPORTS
 // ============================================================================
 
 module.exports = {
-  commands: [],
-  handleLevelingMessage,
-  handleStarboardReaction,
-  startBirthdayScheduler,
-  initLevelRoles,
-  CONFIG,
+  commands, // array of { data, execute } — register each with your command loader
+  handleLevelingMessage, // call from your existing messageCreate handler
+  handleStarboardReaction, // call from your existing messageReactionAdd/Remove handlers
+  startBirthdayScheduler, // call once at boot: startBirthdayScheduler(client)
+  CONFIG, // tweak currency, cooldowns, XP rates, etc. here
 };
