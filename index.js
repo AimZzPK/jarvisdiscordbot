@@ -1216,6 +1216,31 @@ const commands = [
     .addSubcommand(sub => sub.setName('toggle').setDescription('Enable or disable autoroles entirely')
       .addBooleanOption(o => o.setName('enabled').setDescription('Turn autoroles on or off').setRequired(true)))
     .setDMPermission(false),
+  // ── Info commands ──────────────────────────────────────────────
+  new SlashCommandBuilder()
+    .setName('userinfo').setDescription('Show info about a user')
+    .addUserOption(o => o.setName('user').setDescription('User to look up').setRequired(false))
+    .setDMPermission(false),
+ 
+  new SlashCommandBuilder()
+    .setName('serverinfo').setDescription('Show info about this server')
+    .setDMPermission(false),
+ 
+  new SlashCommandBuilder()
+    .setName('avatar').setDescription("Show a user's avatar")
+    .addUserOption(o => o.setName('user').setDescription('User to look up').setRequired(false))
+    .setDMPermission(false),
+ 
+  new SlashCommandBuilder()
+    .setName('roleinfo').setDescription('Show info about a role')
+    .addRoleOption(o => o.setName('role').setDescription('Role to look up').setRequired(true))
+    .setDMPermission(false),
+ 
+  // ── AFK ─────────────────────────────────────────────────────────
+  new SlashCommandBuilder()
+    .setName('afk').setDescription('Set yourself as AFK')
+    .addStringOption(o => o.setName('reason').setDescription('Reason (optional)').setRequired(false))
+    .setDMPermission(false),
 ].map(c => c.toJSON())
 
 // =========================
@@ -1942,6 +1967,85 @@ client.on('interactionCreate', async (interaction) => {
     });
   }
 
+   // ── /userinfo ──────────────────────────────────────────────────
+  if (interaction.commandName === 'userinfo') {
+    const target = interaction.options.getUser('user') || interaction.user;
+    const member = await interaction.guild.members.fetch(target.id).catch(() => null);
+    const roles = member ? member.roles.cache.filter(r => r.id !== interaction.guild.id).map(r => `<@&${r.id}>`).join(', ') || 'None' : 'Unknown';
+    const embed = new EmbedBuilder()
+      .setColor(0x5865f2)
+      .setTitle(`👤 ${target.tag}`)
+      .setThumbnail(target.displayAvatarURL({ dynamic: true, size: 256 }))
+      .addFields(
+        { name: 'ID', value: target.id, inline: true },
+        { name: 'Bot?', value: target.bot ? 'Yes' : 'No', inline: true },
+        { name: 'Nickname', value: member?.nickname || 'None', inline: true },
+        { name: 'Account Created', value: `<t:${Math.floor(target.createdTimestamp / 1000)}:R>`, inline: true },
+        { name: 'Joined Server', value: member ? `<t:${Math.floor(member.joinedTimestamp / 1000)}:R>` : 'Unknown', inline: true },
+        { name: `Roles (${member ? member.roles.cache.size - 1 : 0})`, value: roles.length > 1024 ? roles.slice(0, 1021) + '...' : roles }
+      )
+      .setFooter({ text: `JARVIS • ${interaction.guild.name}` }).setTimestamp();
+    return interaction.reply({ embeds: [embed] });
+  }
+ 
+  // ── /serverinfo ────────────────────────────────────────────────
+  if (interaction.commandName === 'serverinfo') {
+    const g = interaction.guild;
+    const owner = await g.fetchOwner().catch(() => null);
+    const embed = new EmbedBuilder()
+      .setColor(0x5865f2)
+      .setTitle(`🏠 ${g.name}`)
+      .setThumbnail(g.iconURL({ dynamic: true, size: 256 }))
+      .addFields(
+        { name: 'Owner', value: owner ? `<@${owner.id}>` : 'Unknown', inline: true },
+        { name: 'Members', value: `${g.memberCount}`, inline: true },
+        { name: 'Created', value: `<t:${Math.floor(g.createdTimestamp / 1000)}:R>`, inline: true },
+        { name: 'Text Channels', value: `${g.channels.cache.filter(c => c.type === 0).size}`, inline: true },
+        { name: 'Voice Channels', value: `${g.channels.cache.filter(c => c.type === 2).size}`, inline: true },
+        { name: 'Roles', value: `${g.roles.cache.size}`, inline: true },
+        { name: 'Boost Level', value: `${g.premiumTier} (${g.premiumSubscriptionCount || 0} boosts)`, inline: true },
+        { name: 'Server ID', value: g.id, inline: true }
+      )
+      .setFooter({ text: 'JARVIS Server Info' }).setTimestamp();
+    return interaction.reply({ embeds: [embed] });
+  }
+ 
+  // ── /avatar ────────────────────────────────────────────────────
+  if (interaction.commandName === 'avatar') {
+    const target = interaction.options.getUser('user') || interaction.user;
+    const embed = new EmbedBuilder()
+      .setColor(0x5865f2)
+      .setTitle(`🖼️ ${target.tag}'s Avatar`)
+      .setImage(target.displayAvatarURL({ dynamic: true, size: 1024 }))
+      .setFooter({ text: 'JARVIS' });
+    return interaction.reply({ embeds: [embed] });
+  }
+ 
+  // ── /roleinfo ──────────────────────────────────────────────────
+  if (interaction.commandName === 'roleinfo') {
+    const role = interaction.options.getRole('role');
+    const embed = new EmbedBuilder()
+      .setColor(role.color || 0x5865f2)
+      .setTitle(`🎭 ${role.name}`)
+      .addFields(
+        { name: 'ID', value: role.id, inline: true },
+        { name: 'Color', value: role.hexColor, inline: true },
+        { name: 'Members', value: `${role.members.size}`, inline: true },
+        { name: 'Mentionable', value: role.mentionable ? 'Yes' : 'No', inline: true },
+        { name: 'Hoisted', value: role.hoist ? 'Yes' : 'No', inline: true },
+        { name: 'Position', value: `${role.position}`, inline: true },
+        { name: 'Created', value: `<t:${Math.floor(role.createdTimestamp / 1000)}:R>`, inline: true }
+      )
+      .setFooter({ text: 'JARVIS Role Info' }).setTimestamp();
+    return interaction.reply({ embeds: [embed] });
+  }
+ 
+  // ── /afk ───────────────────────────────────────────────────────
+  if (interaction.commandName === 'afk') {
+    const reason = interaction.options.getString('reason') || 'AFK';
+    afkUsers.set(interaction.user.id, { reason, since: Date.now() });
+    return interaction.reply(`💤 You're now AFK: **${reason}**`);
+  }
   // ── /summarize ─────────────────────────────────────────────────
   if (interaction.commandName === 'summarize') {
     const text = interaction.options.getString('text');
