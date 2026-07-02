@@ -1687,44 +1687,56 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.update({ content: `❌ **Tic Tac Toe** — Your turn!\n\n${renderBoard(game.board)}`, components: [row, row2] });
   }
 
-  // ── /vision ────────────────────────────────────────────────────
-  if (interaction.commandName === 'vision') {
-    await interaction.deferReply();
-    const image = interaction.options.getAttachment('image');
-    const question = interaction.options.getString('question') || "What's in this image? Describe it.";
-    if (!image.contentType?.startsWith('image/')) return interaction.editReply('❌ That attachment is not an image.');
-    try {
-      const res = await axios.post("https://api.openai.com/v1/chat/completions", {
-        model: "gpt-4o", max_tokens: 600,
-        messages: [
-          { role: "system", content: "You are JARVIS with vision. Describe images clearly and specifically. Keep it concise and conversational." },
-          { role: "user", content: [{ type: "image_url", image_url: { url: image.url, detail: "high" } }, { type: "text", text: question }] }
-        ]
-      }, { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, "Content-Type": "application/json" } });
-      return interaction.editReply(res.data.choices[0].message.content);
-    } catch (err) { console.error('[Vision] failed:', err.message); return interaction.editReply('❌ Failed to analyze that image.'); }
-  }
+ // ── /vision ────────────────────────────────────────────────────
+if (interaction.commandName === 'vision') {
+  await interaction.deferReply();
+  const image = interaction.options.getAttachment('image');
+  const question = interaction.options.getString('question') || "What's in this image? Describe it.";
+  if (!image.contentType?.startsWith('image/')) return interaction.editReply('❌ That attachment is not an image.');
+  try {
+    const res = await groq.chat.completions.create({
+      model: "qwen/qwen3.6-27b",
+      max_tokens: 600,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: `You are JARVIS with vision. Describe images clearly and specifically. Keep it concise and conversational.\n\n${question}` },
+            { type: "image_url", image_url: { url: image.url } }
+          ]
+        }
+      ]
+    });
+    return interaction.editReply(res.choices[0].message.content);
+  } catch (err) { console.error('[Vision] failed:', err.message); return interaction.editReply('❌ Failed to analyze that image.'); }
+}
  
   // ── /ocr ───────────────────────────────────────────────────────
-  if (interaction.commandName === 'ocr') {
-    await interaction.deferReply();
-    const image = interaction.options.getAttachment('image');
-    if (!image.contentType?.startsWith('image/')) return interaction.editReply('❌ That attachment is not an image.');
-    try {
-      const res = await axios.post("https://api.openai.com/v1/chat/completions", {
-        model: "gpt-4o", max_tokens: 800,
-        messages: [
-          { role: "system", content: "Extract ALL readable text from the image exactly as written, preserving line breaks. Output only the extracted text, nothing else. If there is no text, say 'No text found in this image.'" },
-          { role: "user", content: [{ type: "image_url", image_url: { url: image.url, detail: "high" } }, { type: "text", text: "Extract the text from this image." }] }
-        ]
-      }, { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, "Content-Type": "application/json" } });
-      const text = res.data.choices[0].message.content;
-      const chunks = splitMessage(`📝 **Extracted Text:**\n\`\`\`\n${text}\n\`\`\``);
-      await interaction.editReply(chunks[0]);
-      for (const chunk of chunks.slice(1)) await interaction.followUp(chunk);
-    } catch (err) { console.error('[OCR] failed:', err.message); return interaction.editReply('❌ Failed to extract text from that image.'); }
-  }
- 
+if (interaction.commandName === 'ocr') {
+  await interaction.deferReply();
+  const image = interaction.options.getAttachment('image');
+  if (!image.contentType?.startsWith('image/')) return interaction.editReply('❌ That attachment is not an image.');
+  try {
+    const res = await groq.chat.completions.create({
+      model: "qwen/qwen3.6-27b",
+      max_tokens: 800,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Extract ALL readable text from the image exactly as written, preserving line breaks. Output only the extracted text, nothing else. If there is no text, say 'No text found in this image.'" },
+            { type: "image_url", image_url: { url: image.url } }
+          ]
+        }
+      ]
+    });
+    const text = res.choices[0].message.content;
+    const chunks = splitMessage(`📝 **Extracted Text:**\n\`\`\`\n${text}\n\`\`\``);
+    await interaction.editReply(chunks[0]);
+    for (const chunk of chunks.slice(1)) await interaction.followUp(chunk);
+  } catch (err) { console.error('[OCR] failed:', err.message); return interaction.editReply('❌ Failed to extract text from that image.'); }
+}
+
   // ── /rewrite ───────────────────────────────────────────────────
   if (interaction.commandName === 'rewrite') {
     await interaction.deferReply();
@@ -3099,7 +3111,7 @@ client.on('messageCreate', async (message) => {
       }
     }
   }
-  
+
   const content = message.content;
   const lower = content.toLowerCase();
   const isDM = message.guild === null;
@@ -3108,22 +3120,28 @@ client.on('messageCreate', async (message) => {
   if (message.author.id === OWNER_ID && !memory.ownerConfirmed) { memory.ownerConfirmed = OWNER_ID; saveMemory(memory); }
   if (lower.includes("@everyone") || lower.includes("@here")) return message.reply("nah I'm not doing that 💀 I don't mass ping people");
 
-  if (message.attachments.size > 0) {
-    const imageAttachment = message.attachments.find(a => a.contentType && ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp'].includes(a.contentType));
-    if (imageAttachment) {
-      const cleanMsg = content.replace(/<@!?\d+>/g, '').trim();
-      const question = cleanMsg.length > 0 ? cleanMsg : "What's in this image? Describe it.";
-      try {
-        message.channel.sendTyping();
-        const res = await axios.post("https://api.openai.com/v1/chat/completions", {
-          model: "gpt-4o", max_tokens: 600,
-          messages: [{ role: "system", content: "You are JARVIS, a chill smart Discord bot with vision. Analyze images naturally like talking to a friend. Be specific and interesting. Keep it conversational and concise. Never write @everyone or @here." }, { role: "user", content: [{ type: "image_url", image_url: { url: imageAttachment.url, detail: "high" } }, { type: "text", text: question }] }]
-        }, { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, "Content-Type": "application/json" } });
-        let reply = res.data.choices[0].message.content.replace(/@everyone/gi, '`@everyone`').replace(/@here/gi, '`@here`');
-        return message.reply(reply);
-      } catch { return message.reply("couldn't read that image rn 💀"); }
-    }
-  }
+  if (imageAttachment) {
+  const cleanMsg = content.replace(/<@!?\d+>/g, '').trim();
+  const question = cleanMsg.length > 0 ? cleanMsg : "What's in this image? Describe it.";
+  try {
+    message.channel.sendTyping();
+    const res = await groq.chat.completions.create({
+      model: "qwen/qwen3.6-27b",
+      max_tokens: 600,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: `You are JARVIS, a chill smart Discord bot with vision. Analyze images naturally like talking to a friend. Be specific and interesting. Keep it conversational and concise. Never write @everyone or @here.\n\n${question}` },
+            { type: "image_url", image_url: { url: imageAttachment.url } }
+          ]
+        }
+      ]
+    });
+    let reply = res.choices[0].message.content.replace(/@everyone/gi, '`@everyone`').replace(/@here/gi, '`@here`');
+    return message.reply(reply);
+  } catch { return message.reply("couldn't read that image rn 💀"); }
+}
 
   const key = `${message.guild?.id || "dm"}-${message.channel.id}`;
   if (!memory[key]) memory[key] = { messages: [] };
