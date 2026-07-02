@@ -1696,8 +1696,8 @@ if (interaction.commandName === 'vision') {
   try {
     const res = await groq.chat.completions.create({
       model: "qwen/qwen3.6-27b",
-      max_tokens: 2048,
-      reasoning_format: "hidden",
+      max_tokens: 600,
+      reasoning_effort: "none",
       messages: [
         {
           role: "user",
@@ -1714,7 +1714,7 @@ if (interaction.commandName === 'vision') {
       .trim();
     if (!text) {
       text = choice.finish_reason === 'length'
-        ? "❌ The model ran out of room thinking about this one — try a shorter/simpler question, or I'll bump the token limit further."
+        ? "❌ Ran out of room on that one — try a shorter question."
         : "❌ Got an empty response, try again.";
     }
     const chunks = splitMessage(text);
@@ -1732,7 +1732,7 @@ if (interaction.commandName === 'ocr') {
     const res = await groq.chat.completions.create({
       model: "qwen/qwen3.6-27b",
       max_tokens: 800,
-      reasoning_format: "hidden",
+      reasoning_effort: "none",
       messages: [
         {
           role: "user",
@@ -1743,7 +1743,7 @@ if (interaction.commandName === 'ocr') {
         }
       ]
     });
-    const text = res.choices[0].message.content
+    const text = (res.choices[0].message.content || '')
       .replace(/<think>[\s\S]*?<\/think>/gi, '')
       .trim();
     const chunks = splitMessage(`📝 **Extracted Text:**\n\`\`\`\n${text || 'No text found in this image.'}\n\`\`\``);
@@ -3135,35 +3135,38 @@ client.on('messageCreate', async (message) => {
   if (message.author.id === OWNER_ID && !memory.ownerConfirmed) { memory.ownerConfirmed = OWNER_ID; saveMemory(memory); }
   if (lower.includes("@everyone") || lower.includes("@here")) return message.reply("nah I'm not doing that 💀 I don't mass ping people");
 
- if (imageAttachment) {
-  const cleanMsg = content.replace(/<@!?\d+>/g, '').trim();
-  const question = cleanMsg.length > 0 ? cleanMsg : "What's in this image? Describe it.";
-  try {
-    message.channel.sendTyping();
-    const res = await groq.chat.completions.create({
-      model: "qwen/qwen3.6-27b",
-      max_tokens: 400,
-      reasoning_format: "hidden",
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: `You are JARVIS, a chill smart Discord bot with vision. Analyze images naturally like talking to a friend. Be specific and interesting. Keep it conversational and concise — 2-4 sentences. Never write @everyone or @here.\n\n${question}` },
-            { type: "image_url", image_url: { url: imageAttachment.url } }
+ if (message.attachments.size > 0) {
+    const imageAttachment = message.attachments.find(a => a.contentType && ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp'].includes(a.contentType));
+    if (imageAttachment) {
+      const cleanMsg = content.replace(/<@!?\d+>/g, '').trim();
+      const question = cleanMsg.length > 0 ? cleanMsg : "What's in this image? Describe it.";
+      try {
+        message.channel.sendTyping();
+        const res = await groq.chat.completions.create({
+          model: "qwen/qwen3.6-27b",
+          max_tokens: 400,
+          reasoning_effort: "none",
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: `You are JARVIS, a chill smart Discord bot with vision. Analyze images naturally like talking to a friend. Be specific and interesting. Keep it conversational and concise — 2-4 sentences. Never write @everyone or @here.\n\n${question}` },
+                { type: "image_url", image_url: { url: imageAttachment.url } }
+              ]
+            }
           ]
-        }
-      ]
-    });
-    let reply = res.choices[0].message.content
-      .replace(/<think>[\s\S]*?<\/think>/gi, '')
-      .replace(/@everyone/gi, '`@everyone`').replace(/@here/gi, '`@here`')
-      .trim();
-    if (!reply) reply = "couldn't read that image rn 💀";
-    const chunks = splitMessage(reply);
-    for (const chunk of chunks) await message.reply(chunk);
-    return;
-  } catch { return message.reply("couldn't read that image rn 💀"); }
-}
+        });
+        let reply = (res.choices[0].message.content || '')
+          .replace(/<think>[\s\S]*?<\/think>/gi, '')
+          .replace(/@everyone/gi, '`@everyone`').replace(/@here/gi, '`@here`')
+          .trim();
+        if (!reply) reply = "couldn't read that image rn 💀";
+        const chunks = splitMessage(reply);
+        for (const chunk of chunks) await message.reply(chunk);
+        return;
+      } catch { return message.reply("couldn't read that image rn 💀"); }
+    }
+  }
 
   const key = `${message.guild?.id || "dm"}-${message.channel.id}`;
   if (!memory[key]) memory[key] = { messages: [] };
