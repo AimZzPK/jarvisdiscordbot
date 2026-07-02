@@ -4,6 +4,7 @@ const activeGiveaways = new Map();
 const { initSocialNotifications } = require('./socialNotifications');
 const { joinAndListen, leaveVoice, initVoiceAssistant } = require('./voiceAssistant');
 const axios = require('axios');
+const afkUsers = new Map();
 
 const {
   Client,
