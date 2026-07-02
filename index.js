@@ -1242,6 +1242,91 @@ const commands = [
     .setName('afk').setDescription('Set yourself as AFK')
     .addStringOption(o => o.setName('reason').setDescription('Reason (optional)').setRequired(false))
     .setDMPermission(false),
+      // ── Timezones ───────────────────────────────────────────────────
+  new SlashCommandBuilder()
+    .setName('timezone').setDescription('Set your timezone so /time can use it')
+    .addStringOption(o => o.setName('tz').setDescription('IANA timezone, e.g. Europe/Amsterdam').setRequired(true))
+    .setDMPermission(true),
+ 
+  new SlashCommandBuilder()
+    .setName('time').setDescription("Show a user's local time (or yours)")
+    .addUserOption(o => o.setName('user').setDescription('User to check').setRequired(false))
+    .setDMPermission(true),
+
+     // ── AI utilities ────────────────────────────────────────────────
+  new SlashCommandBuilder()
+    .setName('vision').setDescription('Describe or analyze an image')
+    .addAttachmentOption(o => o.setName('image').setDescription('Image to analyze').setRequired(true))
+    .addStringOption(o => o.setName('question').setDescription('What to ask about the image').setRequired(false))
+    .setDMPermission(true),
+ 
+  new SlashCommandBuilder()
+    .setName('ocr').setDescription('Extract text from an image')
+    .addAttachmentOption(o => o.setName('image').setDescription('Image containing text').setRequired(true))
+    .setDMPermission(true),
+ 
+  new SlashCommandBuilder()
+    .setName('rewrite').setDescription('Rephrase or improve a piece of text')
+    .addStringOption(o => o.setName('text').setDescription('Text to rewrite').setRequired(true))
+    .addStringOption(o => o.setName('style').setDescription('Tone/style to rewrite in').setRequired(false)
+      .addChoices(
+        { name: 'Professional', value: 'professional' },
+        { name: 'Casual', value: 'casual' },
+        { name: 'Concise', value: 'concise' },
+        { name: 'Friendly', value: 'friendly' },
+        { name: 'Formal', value: 'formal' },
+      ))
+    .setDMPermission(true),
+ 
+  new SlashCommandBuilder()
+    .setName('grammar').setDescription('Check and fix grammar in a piece of text')
+    .addStringOption(o => o.setName('text').setDescription('Text to check').setRequired(true))
+    .setDMPermission(true),
+ 
+  // ── Moderation utilities ────────────────────────────────────────
+  new SlashCommandBuilder()
+    .setName('purge').setDescription('Bulk delete messages in this channel')
+    .addIntegerOption(o => o.setName('amount').setDescription('Number of messages to delete (1-100)').setRequired(true).setMinValue(1).setMaxValue(100))
+    .addUserOption(o => o.setName('user').setDescription('Only delete messages from this user').setRequired(false))
+    .setDMPermission(false),
+ 
+  new SlashCommandBuilder()
+    .setName('slowmode').setDescription('Set slowmode for this channel')
+    .addIntegerOption(o => o.setName('seconds').setDescription('Seconds between messages (0 to disable)').setRequired(true).setMinValue(0).setMaxValue(21600))
+    .setDMPermission(false),
+ 
+  new SlashCommandBuilder().setName('lock').setDescription('Lock this channel (stop @everyone from sending messages)').setDMPermission(false),
+  new SlashCommandBuilder().setName('unlock').setDescription('Unlock this channel').setDMPermission(false),
+ 
+  new SlashCommandBuilder()
+    .setName('nick').setDescription("Change a user's nickname")
+    .addUserOption(o => o.setName('user').setDescription('User to rename').setRequired(true))
+    .addStringOption(o => o.setName('nickname').setDescription('New nickname (leave blank to reset)').setRequired(false))
+    .setDMPermission(false),
+ 
+  new SlashCommandBuilder()
+    .setName('tempban').setDescription('Temporarily ban a user')
+    .addUserOption(o => o.setName('user').setDescription('User to ban').setRequired(true))
+    .addIntegerOption(o => o.setName('minutes').setDescription('Duration in minutes').setRequired(true).setMinValue(1))
+    .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false))
+    .setDMPermission(false),
+ 
+  new SlashCommandBuilder()
+    .setName('softban').setDescription("Softban a user (kick + delete their recent messages)")
+    .addUserOption(o => o.setName('user').setDescription('User to softban').setRequired(true))
+    .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false))
+    .setDMPermission(false),
+ 
+  new SlashCommandBuilder()
+    .setName('note').setDescription('Manage private staff notes on a user')
+    .addSubcommand(sub => sub.setName('add').setDescription('Add a note')
+      .addUserOption(o => o.setName('user').setDescription('User').setRequired(true))
+      .addStringOption(o => o.setName('text').setDescription('Note text').setRequired(true)))
+    .addSubcommand(sub => sub.setName('list').setDescription('List notes for a user')
+      .addUserOption(o => o.setName('user').setDescription('User').setRequired(true)))
+    .addSubcommand(sub => sub.setName('clear').setDescription('Clear all notes for a user')
+      .addUserOption(o => o.setName('user').setDescription('User').setRequired(true)))
+    .setDMPermission(false),
 ].map(c => c.toJSON())
 
 // =========================
@@ -1521,6 +1606,31 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
+    // ── /timezone ──────────────────────────────────────────────────
+  if (interaction.commandName === 'timezone') {
+    const tz = interaction.options.getString('tz');
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: tz }); // throws if invalid
+    } catch {
+      return interaction.reply({ content: `❌ \`${tz}\` isn't a valid IANA timezone. Example: \`Europe/Amsterdam\`, \`America/New_York\`.`, flags: 64 });
+    }
+    memory.timezones = memory.timezones || {};
+    memory.timezones[interaction.user.id] = tz;
+    await saveMemory(memory);
+    return interaction.reply({ content: `✅ Your timezone is set to **${tz}**.`, flags: 64 });
+  }
+ 
+  // ── /time ──────────────────────────────────────────────────────
+  if (interaction.commandName === 'time') {
+    const target = interaction.options.getUser('user') || interaction.user;
+    const tz = memory.timezones?.[target.id];
+    if (!tz) return interaction.reply({ content: `❌ ${target.id === interaction.user.id ? "You haven't" : `**${target.username}** hasn't`} set a timezone. Use \`/timezone\` first.`, flags: 64 });
+    const now = new Date();
+    const formatted = now.toLocaleString('en-US', { timeZone: tz, weekday: 'long', hour: '2-digit', minute: '2-digit', hour12: true });
+    return interaction.reply(`🕒 It's currently **${formatted}** for **${target.username}** (${tz}).`);
+  }
+ 
+
   // ── Tic Tac Toe buttons ────────────────────────────────────────
   if (interaction.isButton() && interaction.customId.startsWith('ttt_')) {
     const parts = interaction.customId.split('_');
@@ -1575,6 +1685,185 @@ client.on('interactionCreate', async (interaction) => {
     const row = new ActionRowBuilder().addComponents(game.board.slice(0,5).map((v, i) => new ButtonBuilder().setCustomId(`ttt_${ownerId}_${i+1}`).setLabel(v === 'X' ? 'X' : v === 'O' ? 'O' : `${i+1}`).setStyle(v === 'X' ? ButtonStyle.Danger : v === 'O' ? ButtonStyle.Success : ButtonStyle.Secondary).setDisabled(v === 'X' || v === 'O')));
     const row2 = new ActionRowBuilder().addComponents(game.board.slice(5).map((v, i) => new ButtonBuilder().setCustomId(`ttt_${ownerId}_${i+6}`).setLabel(v === 'X' ? 'X' : v === 'O' ? 'O' : `${i+6}`).setStyle(v === 'X' ? ButtonStyle.Danger : v === 'O' ? ButtonStyle.Success : ButtonStyle.Secondary).setDisabled(v === 'X' || v === 'O')));
     return interaction.update({ content: `❌ **Tic Tac Toe** — Your turn!\n\n${renderBoard(game.board)}`, components: [row, row2] });
+  }
+
+  // ── /vision ────────────────────────────────────────────────────
+  if (interaction.commandName === 'vision') {
+    await interaction.deferReply();
+    const image = interaction.options.getAttachment('image');
+    const question = interaction.options.getString('question') || "What's in this image? Describe it.";
+    if (!image.contentType?.startsWith('image/')) return interaction.editReply('❌ That attachment is not an image.');
+    try {
+      const res = await axios.post("https://api.openai.com/v1/chat/completions", {
+        model: "gpt-4o", max_tokens: 600,
+        messages: [
+          { role: "system", content: "You are JARVIS with vision. Describe images clearly and specifically. Keep it concise and conversational." },
+          { role: "user", content: [{ type: "image_url", image_url: { url: image.url, detail: "high" } }, { type: "text", text: question }] }
+        ]
+      }, { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, "Content-Type": "application/json" } });
+      return interaction.editReply(res.data.choices[0].message.content);
+    } catch (err) { console.error('[Vision] failed:', err.message); return interaction.editReply('❌ Failed to analyze that image.'); }
+  }
+ 
+  // ── /ocr ───────────────────────────────────────────────────────
+  if (interaction.commandName === 'ocr') {
+    await interaction.deferReply();
+    const image = interaction.options.getAttachment('image');
+    if (!image.contentType?.startsWith('image/')) return interaction.editReply('❌ That attachment is not an image.');
+    try {
+      const res = await axios.post("https://api.openai.com/v1/chat/completions", {
+        model: "gpt-4o", max_tokens: 800,
+        messages: [
+          { role: "system", content: "Extract ALL readable text from the image exactly as written, preserving line breaks. Output only the extracted text, nothing else. If there is no text, say 'No text found in this image.'" },
+          { role: "user", content: [{ type: "image_url", image_url: { url: image.url, detail: "high" } }, { type: "text", text: "Extract the text from this image." }] }
+        ]
+      }, { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, "Content-Type": "application/json" } });
+      const text = res.data.choices[0].message.content;
+      const chunks = splitMessage(`📝 **Extracted Text:**\n\`\`\`\n${text}\n\`\`\``);
+      await interaction.editReply(chunks[0]);
+      for (const chunk of chunks.slice(1)) await interaction.followUp(chunk);
+    } catch (err) { console.error('[OCR] failed:', err.message); return interaction.editReply('❌ Failed to extract text from that image.'); }
+  }
+ 
+  // ── /rewrite ───────────────────────────────────────────────────
+  if (interaction.commandName === 'rewrite') {
+    await interaction.deferReply();
+    const text = interaction.options.getString('text');
+    const style = interaction.options.getString('style') || 'clear and natural';
+    try {
+      const res = await groq.chat.completions.create({
+        model: 'llama-3.3-70b-versatile',
+        messages: [
+          { role: 'system', content: `Rewrite the user's text in a ${style} tone/style. Keep the original meaning intact. Return only the rewritten text, nothing else.` },
+          { role: 'user', content: text }
+        ],
+        temperature: 0.7, max_tokens: 600,
+      });
+      return interaction.editReply(res.choices[0].message.content);
+    } catch { return interaction.editReply('❌ Failed to rewrite that text.'); }
+  }
+ 
+  // ── /grammar ───────────────────────────────────────────────────
+  if (interaction.commandName === 'grammar') {
+    await interaction.deferReply();
+    const text = interaction.options.getString('text');
+    try {
+      const res = await groq.chat.completions.create({
+        model: 'llama-3.3-70b-versatile',
+        messages: [
+          { role: 'system', content: 'Fix grammar, spelling, and punctuation in the given text. Return the corrected text first, then on a new line starting with "Changes:" briefly note what was fixed (or "No changes needed" if none).' },
+          { role: 'user', content: text }
+        ],
+        temperature: 0.3, max_tokens: 600,
+      });
+      return interaction.editReply(res.choices[0].message.content);
+    } catch { return interaction.editReply('❌ Failed to check that text.'); }
+  }
+ 
+  // ── /purge ─────────────────────────────────────────────────────
+  if (interaction.commandName === 'purge') {
+    if (!interaction.member.permissions.has('ManageMessages')) return interaction.reply({ content: '❌ You need **Manage Messages** permission.', flags: 64 });
+    const amount = interaction.options.getInteger('amount');
+    const targetUser = interaction.options.getUser('user');
+    await interaction.deferReply({ flags: 64 });
+    try {
+      let messages = await interaction.channel.messages.fetch({ limit: amount });
+      if (targetUser) messages = messages.filter(m => m.author.id === targetUser.id);
+      const deleted = await interaction.channel.bulkDelete(messages, true);
+      await pushLogEvent(interaction.guild.id, { type: 'purge', userId: interaction.user.id, username: interaction.user.tag, detail: `Purged ${deleted.size} message(s) in #${interaction.channel.name}${targetUser ? ` from ${targetUser.tag}` : ''}` });
+      return interaction.editReply(`🧹 Deleted **${deleted.size}** message(s).`);
+    } catch (err) { console.error('[Purge] failed:', err.message); return interaction.editReply('❌ Could not delete messages (they may be older than 14 days).'); }
+  }
+ 
+  // ── /slowmode ──────────────────────────────────────────────────
+  if (interaction.commandName === 'slowmode') {
+    if (!interaction.member.permissions.has('ManageChannels')) return interaction.reply({ content: '❌ You need **Manage Channels** permission.', flags: 64 });
+    const seconds = interaction.options.getInteger('seconds');
+    try {
+      await interaction.channel.setRateLimitPerUser(seconds);
+      return interaction.reply(seconds === 0 ? '✅ Slowmode disabled.' : `🐌 Slowmode set to **${seconds}s**.`);
+    } catch { return interaction.reply({ content: '❌ Could not set slowmode.', flags: 64 }); }
+  }
+ 
+  // ── /lock & /unlock ────────────────────────────────────────────
+  if (interaction.commandName === 'lock' || interaction.commandName === 'unlock') {
+    if (!interaction.member.permissions.has('ManageChannels')) return interaction.reply({ content: '❌ You need **Manage Channels** permission.', flags: 64 });
+    const locking = interaction.commandName === 'lock';
+    try {
+      await interaction.channel.permissionOverwrites.edit(interaction.guild.id, { SendMessages: locking ? false : null });
+      await pushLogEvent(interaction.guild.id, { type: locking ? 'channelLock' : 'channelUnlock', userId: interaction.user.id, username: interaction.user.tag, detail: `#${interaction.channel.name} ${locking ? 'locked' : 'unlocked'} by ${interaction.user.tag}` });
+      return interaction.reply(locking ? '🔒 Channel locked.' : '🔓 Channel unlocked.');
+    } catch { return interaction.reply({ content: '❌ Could not update this channel.', flags: 64 }); }
+  }
+ 
+  // ── /nick ──────────────────────────────────────────────────────
+  if (interaction.commandName === 'nick') {
+    if (!interaction.member.permissions.has('ManageNicknames')) return interaction.reply({ content: '❌ You need **Manage Nicknames** permission.', flags: 64 });
+    const target = interaction.options.getUser('user');
+    const nickname = interaction.options.getString('nickname') || null;
+    try {
+      const member = await interaction.guild.members.fetch(target.id);
+      await member.setNickname(nickname);
+      return interaction.reply(nickname ? `✅ Nickname for **${target.username}** set to **${nickname}**.` : `✅ Nickname for **${target.username}** reset.`);
+    } catch { return interaction.reply({ content: '❌ Could not change that nickname (check role hierarchy).', flags: 64 }); }
+  }
+ 
+  // ── /tempban ───────────────────────────────────────────────────
+  if (interaction.commandName === 'tempban') {
+    if (!interaction.member.permissions.has('BanMembers')) return interaction.reply({ content: '❌ You need **Ban Members** permission.', flags: 64 });
+    const target = interaction.options.getUser('user');
+    const minutes = interaction.options.getInteger('minutes');
+    const reason = interaction.options.getString('reason') || 'No reason given';
+    try {
+      await interaction.guild.members.ban(target.id, { reason: `[Tempban] ${reason}` });
+      await pushLogEvent(interaction.guild.id, { type: 'ban', userId: target.id, username: target.tag, detail: `Tempbanned ${minutes}m by ${interaction.user.tag} — ${reason}` });
+      setTimeout(async () => {
+        try {
+          await interaction.guild.members.unban(target.id, 'Tempban expired');
+          await pushLogEvent(interaction.guild.id, { type: 'unban', userId: target.id, username: target.tag, detail: 'Tempban expired — automatically unbanned' });
+        } catch (err) { console.error('[Tempban] auto-unban failed:', err.message); }
+      }, minutes * 60 * 1000);
+      return interaction.reply(`🔨 **${target.username}** temp-banned for **${minutes} minute(s)**. Reason: ${reason}`);
+    } catch (err) { return interaction.reply({ content: `❌ Could not ban that user: ${err.message}`, flags: 64 }); }
+  }
+ 
+  // ── /softban ───────────────────────────────────────────────────
+  if (interaction.commandName === 'softban') {
+    if (!interaction.member.permissions.has('BanMembers') || !interaction.member.permissions.has('KickMembers')) return interaction.reply({ content: '❌ You need **Ban Members** and **Kick Members** permission.', flags: 64 });
+    const target = interaction.options.getUser('user');
+    const reason = interaction.options.getString('reason') || 'No reason given';
+    try {
+      await interaction.guild.members.ban(target.id, { reason: `[Softban] ${reason}`, deleteMessageSeconds: 7 * 24 * 60 * 60 });
+      await interaction.guild.members.unban(target.id, 'Softban — auto unban after purge');
+      await pushLogEvent(interaction.guild.id, { type: 'kick', userId: target.id, username: target.tag, detail: `Softbanned by ${interaction.user.tag} — ${reason}` });
+      return interaction.reply(`🧹 **${target.username}** softbanned (kicked, recent messages purged). Reason: ${reason}`);
+    } catch (err) { return interaction.reply({ content: `❌ Could not softban that user: ${err.message}`, flags: 64 }); }
+  }
+ 
+  // ── /note ──────────────────────────────────────────────────────
+  if (interaction.commandName === 'note') {
+    if (!interaction.member.permissions.has('ModerateMembers')) return interaction.reply({ content: '❌ You need **Moderate Members** permission.', flags: 64 });
+    const sub = interaction.options.getSubcommand();
+    const target = interaction.options.getUser('user');
+    const key = `notes-${interaction.guild.id}-${target.id}`;
+    if (sub === 'add') {
+      const text = interaction.options.getString('text');
+      memory[key] = memory[key] || [];
+      memory[key].push({ text, by: interaction.user.tag, time: Date.now() });
+      await saveMemory(memory);
+      return interaction.reply({ content: `📝 Note added for **${target.username}**. Total notes: **${memory[key].length}**`, flags: 64 });
+    }
+    if (sub === 'list') {
+      const notes = memory[key] || [];
+      if (notes.length === 0) return interaction.reply({ content: `📭 No notes for **${target.username}**.`, flags: 64 });
+      const list = notes.map((n, i) => `${i + 1}. ${n.text} — *${n.by}, <t:${Math.floor(n.time / 1000)}:R>*`).join('\n');
+      return interaction.reply({ embeds: [new EmbedBuilder().setColor(0xfbbf24).setTitle(`📝 Staff Notes — ${target.username}`).setDescription(list).setFooter({ text: 'JARVIS • Private staff notes' })], flags: 64 });
+    }
+    if (sub === 'clear') {
+      const count = memory[key]?.length || 0;
+      delete memory[key]; await saveMemory(memory);
+      return interaction.reply({ content: `🧹 Cleared **${count}** note(s) for **${target.username}**.`, flags: 64 });
+    }
   }
 
   // ── Giveaway enter button ──────────────────────────────────────
@@ -2814,6 +3103,22 @@ client.on('messageCreate', async (message) => {
         let reply = res.data.choices[0].message.content.replace(/@everyone/gi, '`@everyone`').replace(/@here/gi, '`@here`');
         return message.reply(reply);
       } catch { return message.reply("couldn't read that image rn 💀"); }
+    }
+  }
+    // Clear AFK if the AFK user talks again
+  if (afkUsers.has(message.author.id)) {
+    const data = afkUsers.get(message.author.id);
+    afkUsers.delete(message.author.id);
+    message.reply(`👋 Welcome back <@${message.author.id}>! I removed your AFK status (was AFK for ${Math.round((Date.now() - data.since) / 60000)} min).`).catch(() => {});
+  }
+ 
+  // Notify if someone mentions an AFK user
+  if (message.mentions.users.size > 0) {
+    for (const [, user] of message.mentions.users) {
+      if (afkUsers.has(user.id)) {
+        const data = afkUsers.get(user.id);
+        message.reply(`💤 **${user.username}** is AFK: ${data.reason} (<t:${Math.floor(data.since / 1000)}:R>)`).catch(() => {});
+      }
     }
   }
 
