@@ -3081,6 +3081,25 @@ client.on('messageReactionRemove', async (reaction, user) => {
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   await handleAutomod(message);
+  
+
+    // Clear AFK if the AFK user talks again
+  if (afkUsers.has(message.author.id)) {
+    const data = afkUsers.get(message.author.id);
+    afkUsers.delete(message.author.id);
+    message.reply(`👋 Welcome back <@${message.author.id}>! I removed your AFK status (was AFK for ${Math.round((Date.now() - data.since) / 60000)} min).`).catch(() => {});
+  }
+ 
+  // Notify if someone mentions an AFK user
+  if (message.mentions.users.size > 0) {
+    for (const [, user] of message.mentions.users) {
+      if (afkUsers.has(user.id)) {
+        const data = afkUsers.get(user.id);
+        message.reply(`💤 **${user.username}** is AFK: ${data.reason} (<t:${Math.floor(data.since / 1000)}:R>)`).catch(() => {});
+      }
+    }
+  }
+  
   const content = message.content;
   const lower = content.toLowerCase();
   const isDM = message.guild === null;
@@ -3103,22 +3122,6 @@ client.on('messageCreate', async (message) => {
         let reply = res.data.choices[0].message.content.replace(/@everyone/gi, '`@everyone`').replace(/@here/gi, '`@here`');
         return message.reply(reply);
       } catch { return message.reply("couldn't read that image rn 💀"); }
-    }
-  }
-    // Clear AFK if the AFK user talks again
-  if (afkUsers.has(message.author.id)) {
-    const data = afkUsers.get(message.author.id);
-    afkUsers.delete(message.author.id);
-    message.reply(`👋 Welcome back <@${message.author.id}>! I removed your AFK status (was AFK for ${Math.round((Date.now() - data.since) / 60000)} min).`).catch(() => {});
-  }
- 
-  // Notify if someone mentions an AFK user
-  if (message.mentions.users.size > 0) {
-    for (const [, user] of message.mentions.users) {
-      if (afkUsers.has(user.id)) {
-        const data = afkUsers.get(user.id);
-        message.reply(`💤 **${user.username}** is AFK: ${data.reason} (<t:${Math.floor(data.since / 1000)}:R>)`).catch(() => {});
-      }
     }
   }
 
