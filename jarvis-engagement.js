@@ -1,24 +1,17 @@
 // jarvis-engagement.js
 //
-// Drop-in engagement pack: Leveling/XP, Economy, Birthdays, Rep, Starboard.
-// Everything in one file — commands, Redis helpers, and event hooks.
+// Engagement pack: Leveling/XP, Economy, Birthdays, Rep, Starboard.
+// Wired to work with your existing index.js out of the box:
+//   - commands            -> already consumed via jarvisEngagement.commands
+//   - handleLevelingMessage -> already called in your messageCreate handler
+//   - handleStarboardReaction -> already called in messageReactionAdd
+//   - startBirthdayScheduler -> already called once in clientReady
 //
-// ============================================================================
-// SETUP (read this before wiring it in)
-// ============================================================================
-// 1. Point REDIS below at your existing Redis client (same one used for
-//    your `premium:${guildId}` keys).
-// 2. Register all commands: `client.commands.set(cmd.data.name, cmd)` for
-//    each entry in `module.exports.commands`, and include them in your
-//    slash command deploy script.
-// 3. In your existing `messageCreate` handler, call:
-//      await require('./jarvis-engagement').handleLevelingMessage(message);
-// 4. In your existing `messageReactionAdd` / `messageReactionRemove`
-//    handlers, call:
-//      await require('./jarvis-engagement').handleStarboardReaction(reaction, user);
-// 5. Once at boot, start the birthday scheduler:
-//      require('./jarvis-engagement').startBirthdayScheduler(client);
-// ============================================================================
+// Dashboard integration (leveling on/off + level roles) is exposed via
+// isLevelingEnabled / setLevelingEnabled / getLevelRoles / setLevelRole /
+// removeLevelRole — your dashboard's config API route can `require` this
+// file directly and call those functions. See the patch notes provided
+// alongside this file for the exact config.js + dashboard.html changes.
 
 const {
   SlashCommandBuilder,
@@ -27,18 +20,26 @@ const {
   ChannelType,
 } = require('discord.js');
 const { randomUUID } = require('crypto');
+const { Redis } = require('@upstash/redis');
 
-const REDIS = require('./redis'); // <-- point this at your actual redis client module
+// Same credentials your bot already uses in index.js.
+const REDIS = new Redis({
+  url: process.env.UPSTASH_REDIS_REST_URL,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN,
+});
 
 // ============================================================================
 // STORAGE HELPERS
+// (@upstash/redis auto-serializes/deserializes JSON on get/set)
 // ============================================================================
-// NOTE: @upstash/redis auto-serializes/deserializes JSON on get/set,
-// so we do NOT JSON.parse/JSON.stringify manually here.
 
 async function getJSON(key, fallback = null) {
-  const val = await REDIS.get(key);
-  return val ?? fallback;
+  try {
+    const val = await REDIS.get(key);
+    return val ?? fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 async function setJSON(key, value) {
@@ -65,7 +66,9 @@ const CONFIG = {
 };
 
 const xpKey = (g, u) => `xp:${g}:${u}`;
+const xpUsersKey = (g) => `xpusers:${g}`;
 const levelRolesKey = (g) => `levelroles:${g}`;
+const levelingEnabledKey = (g) => `levelingEnabled:${g}`;
 
 function xpForLevel(level) {
   return 5 * level ** 2 + 50 * level + 100;
@@ -75,6 +78,16 @@ function levelFromXp(totalXp) {
   let level = 0;
   while (totalXp >= xpForLevel(level + 1)) level++;
   return level;
+}
+
+async function isLevelingEnabled(guildId) {
+  const val = await getJSON(levelingEnabledKey(guildId), true);
+  return val !== false;
+}
+
+async function setLevelingEnabled(guildId, enabled) {
+  await setJSON(levelingEnabledKey(guildId), !!enabled);
+  return !!enabled;
 }
 
 async function getUserXp(guildId, userId) {
@@ -88,15 +101,15 @@ async function addXp(guildId, userId, amount) {
   data.level = levelFromXp(data.xp);
   data.lastMessageTs = Date.now();
   await setJSON(xpKey(guildId, userId), data);
+  await REDIS.sadd(xpUsersKey(guildId), userId).catch(() => {});
   return { ...data, leveledUp: data.level > prevLevel, prevLevel };
 }
 
 async function getLeaderboard(guildId, limit = 10) {
-  const keys = await REDIS.keys(`xp:${guildId}:*`);
+  const userIds = await REDIS.smembers(xpUsersKey(guildId)).catch(() => []);
   const entries = await Promise.all(
-    keys.map(async (k) => {
-      const userId = k.split(':')[2];
-      const data = await getJSON(k, { xp: 0, level: 0 });
+    (userIds || []).map(async (userId) => {
+      const data = await getUserXp(guildId, userId);
       return { userId, ...data };
     })
   );
@@ -114,10 +127,18 @@ async function setLevelRole(guildId, level, roleId) {
   return roles;
 }
 
+async function removeLevelRole(guildId, level) {
+  const roles = await getLevelRoles(guildId);
+  delete roles[String(level)];
+  await setJSON(levelRolesKey(guildId), roles);
+  return roles;
+}
+
 const xpCooldowns = new Map();
 
 async function handleLevelingMessage(message) {
   if (message.author.bot || !message.guild) return;
+  if (!(await isLevelingEnabled(message.guild.id))) return;
 
   const cdKey = `${message.guild.id}:${message.author.id}`;
   const now = Date.now();
@@ -525,7 +546,7 @@ const commands = [
       const role = interaction.options.getRole('role');
 
       if (role.managed || role.id === interaction.guild.id) {
-        return interaction.reply({ content: "I can't assign that role.", ephemeral: true });
+        return interaction.reply({ content: "I can't assign that role.", flags: 64 });
       }
 
       const roles = await setLevelRole(interaction.guild.id, level, role.id);
@@ -569,7 +590,7 @@ const commands = [
       if (!result.success) {
         return interaction.reply({
           content: `⏳ You already claimed today. Come back in **${formatMs(result.msRemaining)}**.`,
-          ephemeral: true,
+          flags: 64,
         });
       }
       const embed = new EmbedBuilder()
@@ -590,7 +611,7 @@ const commands = [
       if (!result.success) {
         return interaction.reply({
           content: `⏳ You're tired. Rest for **${formatMs(result.msRemaining)}** before working again.`,
-          ephemeral: true,
+          flags: 64,
         });
       }
       const jobs = [
@@ -622,12 +643,12 @@ const commands = [
       const target = interaction.options.getUser('user');
       const amount = interaction.options.getInteger('amount');
 
-      if (target.id === interaction.user.id) return interaction.reply({ content: "You can't pay yourself.", ephemeral: true });
-      if (target.bot) return interaction.reply({ content: "You can't pay a bot.", ephemeral: true });
+      if (target.id === interaction.user.id) return interaction.reply({ content: "You can't pay yourself.", flags: 64 });
+      if (target.bot) return interaction.reply({ content: "You can't pay a bot.", flags: 64 });
 
       const result = await payUser(interaction.guild.id, interaction.user.id, target.id, amount);
       if (!result.success) {
-        return interaction.reply({ content: `❌ You don't have enough ${CONFIG.currency} to send that.`, ephemeral: true });
+        return interaction.reply({ content: `❌ You don't have enough ${CONFIG.currency} to send that.`, flags: 64 });
       }
 
       const embed = new EmbedBuilder()
@@ -653,11 +674,17 @@ const commands = [
           .addStringOption((opt) => opt.setName('name').setDescription('Item name').setRequired(true))
           .addIntegerOption((opt) => opt.setName('price').setDescription('Price in coins').setRequired(true).setMinValue(1))
           .addRoleOption((opt) => opt.setName('role').setDescription('Role granted on purchase (optional)').setRequired(false))
-          .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
       ),
+    // NOTE: permission checks for subcommands must be done at runtime below —
+    // discord.js does not support setDefaultMemberPermissions() on a
+    // subcommand builder, only on the top-level command.
     async execute(interaction) {
       const sub = interaction.options.getSubcommand();
       const guildId = interaction.guild.id;
+
+      if (sub === 'additem' && !interaction.member.permissions.has('ManageGuild')) {
+        return interaction.reply({ content: '❌ You need **Manage Server** permission to add shop items.', flags: 64 });
+      }
 
       if (sub === 'view') {
         const items = await getShop(guildId);
@@ -674,7 +701,7 @@ const commands = [
         const result = await buyItem(guildId, interaction.user.id, id);
         if (!result.success) {
           const msg = result.reason === 'not_found' ? 'Item not found.' : `You don't have enough ${CONFIG.currency}.`;
-          return interaction.reply({ content: `❌ ${msg}`, ephemeral: true });
+          return interaction.reply({ content: `❌ ${msg}`, flags: 64 });
         }
         if (result.item.roleId) {
           const role = interaction.guild.roles.cache.get(result.item.roleId);
@@ -724,7 +751,7 @@ const commands = [
       if (sub === 'coinflip') {
         const choice = interaction.options.getString('choice');
         const result = await coinflip(guildId, userId, amount, choice);
-        if (!result.success) return interaction.reply({ content: `❌ You don't have enough ${CONFIG.currency}.`, ephemeral: true });
+        if (!result.success) return interaction.reply({ content: `❌ You don't have enough ${CONFIG.currency}.`, flags: 64 });
 
         const embed = new EmbedBuilder()
           .setColor(result.won ? 0x57f287 : 0xed4245)
@@ -738,7 +765,7 @@ const commands = [
 
       if (sub === 'slots') {
         const result = await slots(guildId, userId, amount);
-        if (!result.success) return interaction.reply({ content: `❌ You don't have enough ${CONFIG.currency}.`, ephemeral: true });
+        if (!result.success) return interaction.reply({ content: `❌ You don't have enough ${CONFIG.currency}.`, flags: 64 });
 
         const embed = new EmbedBuilder()
           .setColor(result.net > 0 ? 0x57f287 : 0xed4245)
@@ -776,11 +803,16 @@ const commands = [
           .setName('channel')
           .setDescription('(Admin) Set the channel for birthday announcements')
           .addChannelOption((opt) => opt.setName('channel').setDescription('Announcement channel').addChannelTypes(ChannelType.GuildText).setRequired(true))
-          .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
       ),
+    // Same note as /shop: permission check for the admin subcommand happens
+    // at runtime, not on the subcommand builder.
     async execute(interaction) {
       const sub = interaction.options.getSubcommand();
       const guildId = interaction.guild.id;
+
+      if (sub === 'channel' && !interaction.member.permissions.has('ManageGuild')) {
+        return interaction.reply({ content: '❌ You need **Manage Server** permission to set the birthday channel.', flags: 64 });
+      }
 
       if (sub === 'set') {
         const month = interaction.options.getInteger('month');
@@ -832,7 +864,7 @@ const commands = [
 
       if (target.id === interaction.user.id) {
         const rep = await getRep(guildId, target.id);
-        return interaction.reply({ content: `You can't give rep to yourself. You have **${rep}** rep.`, ephemeral: true });
+        return interaction.reply({ content: `You can't give rep to yourself. You have **${rep}** rep.`, flags: 64 });
       }
 
       if (target.bot) {
@@ -843,9 +875,9 @@ const commands = [
       const result = await giveRep(guildId, interaction.user.id, target.id);
       if (!result.success) {
         if (result.reason === 'cooldown') {
-          return interaction.reply({ content: `⏳ You can give rep again in **${formatMs(result.msRemaining)}**.`, ephemeral: true });
+          return interaction.reply({ content: `⏳ You can give rep again in **${formatMs(result.msRemaining)}**.`, flags: 64 });
         }
-        return interaction.reply({ content: '❌ Something went wrong.', ephemeral: true });
+        return interaction.reply({ content: '❌ Something went wrong.', flags: 64 });
       }
 
       const embed = new EmbedBuilder()
@@ -902,9 +934,20 @@ const commands = [
 // ============================================================================
 
 module.exports = {
-  commands, // array of { data, execute } — register each with your command loader
-  handleLevelingMessage, // call from your existing messageCreate handler
-  handleStarboardReaction, // call from your existing messageReactionAdd/Remove handlers
-  startBirthdayScheduler, // call once at boot: startBirthdayScheduler(client)
-  CONFIG, // tweak currency, cooldowns, XP rates, etc. here
+  commands,
+  handleLevelingMessage,
+  handleStarboardReaction,
+  startBirthdayScheduler,
+  CONFIG,
+
+  // Dashboard-callable getters/setters (used by config.js API route)
+  isLevelingEnabled,
+  setLevelingEnabled,
+  getLevelRoles,
+  setLevelRole,
+  removeLevelRole,
+  getStarboardConfig,
+  setStarboardConfig,
+  getBirthdayConfig,
+  setBirthdayChannel,
 };
