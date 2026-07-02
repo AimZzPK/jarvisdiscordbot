@@ -1697,6 +1697,7 @@ if (interaction.commandName === 'vision') {
     const res = await groq.chat.completions.create({
       model: "qwen/qwen3.6-27b",
       max_tokens: 600,
+      reasoning_format: "hidden",
       messages: [
         {
           role: "user",
@@ -1707,11 +1708,17 @@ if (interaction.commandName === 'vision') {
         }
       ]
     });
-    return interaction.editReply(res.choices[0].message.content);
+    let text = res.choices[0].message.content
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .trim();
+    if (!text) text = "❌ Got an empty response, try again.";
+    const chunks = splitMessage(text);
+    await interaction.editReply(chunks[0]);
+    for (const chunk of chunks.slice(1)) await interaction.followUp(chunk);
   } catch (err) { console.error('[Vision] failed:', err.message); return interaction.editReply('❌ Failed to analyze that image.'); }
 }
  
-  // ── /ocr ───────────────────────────────────────────────────────
+// ── /ocr ───────────────────────────────────────────────────────
 if (interaction.commandName === 'ocr') {
   await interaction.deferReply();
   const image = interaction.options.getAttachment('image');
@@ -1720,6 +1727,7 @@ if (interaction.commandName === 'ocr') {
     const res = await groq.chat.completions.create({
       model: "qwen/qwen3.6-27b",
       max_tokens: 800,
+      reasoning_format: "hidden",
       messages: [
         {
           role: "user",
@@ -1730,8 +1738,10 @@ if (interaction.commandName === 'ocr') {
         }
       ]
     });
-    const text = res.choices[0].message.content;
-    const chunks = splitMessage(`📝 **Extracted Text:**\n\`\`\`\n${text}\n\`\`\``);
+    const text = res.choices[0].message.content
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .trim();
+    const chunks = splitMessage(`📝 **Extracted Text:**\n\`\`\`\n${text || 'No text found in this image.'}\n\`\`\``);
     await interaction.editReply(chunks[0]);
     for (const chunk of chunks.slice(1)) await interaction.followUp(chunk);
   } catch (err) { console.error('[OCR] failed:', err.message); return interaction.editReply('❌ Failed to extract text from that image.'); }
@@ -3120,26 +3130,33 @@ client.on('messageCreate', async (message) => {
   if (message.author.id === OWNER_ID && !memory.ownerConfirmed) { memory.ownerConfirmed = OWNER_ID; saveMemory(memory); }
   if (lower.includes("@everyone") || lower.includes("@here")) return message.reply("nah I'm not doing that 💀 I don't mass ping people");
 
-  if (imageAttachment) {
+ if (imageAttachment) {
   const cleanMsg = content.replace(/<@!?\d+>/g, '').trim();
   const question = cleanMsg.length > 0 ? cleanMsg : "What's in this image? Describe it.";
   try {
     message.channel.sendTyping();
     const res = await groq.chat.completions.create({
       model: "qwen/qwen3.6-27b",
-      max_tokens: 600,
+      max_tokens: 400,
+      reasoning_format: "hidden",
       messages: [
         {
           role: "user",
           content: [
-            { type: "text", text: `You are JARVIS, a chill smart Discord bot with vision. Analyze images naturally like talking to a friend. Be specific and interesting. Keep it conversational and concise. Never write @everyone or @here.\n\n${question}` },
+            { type: "text", text: `You are JARVIS, a chill smart Discord bot with vision. Analyze images naturally like talking to a friend. Be specific and interesting. Keep it conversational and concise — 2-4 sentences. Never write @everyone or @here.\n\n${question}` },
             { type: "image_url", image_url: { url: imageAttachment.url } }
           ]
         }
       ]
     });
-    let reply = res.choices[0].message.content.replace(/@everyone/gi, '`@everyone`').replace(/@here/gi, '`@here`');
-    return message.reply(reply);
+    let reply = res.choices[0].message.content
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .replace(/@everyone/gi, '`@everyone`').replace(/@here/gi, '`@here`')
+      .trim();
+    if (!reply) reply = "couldn't read that image rn 💀";
+    const chunks = splitMessage(reply);
+    for (const chunk of chunks) await message.reply(chunk);
+    return;
   } catch { return message.reply("couldn't read that image rn 💀"); }
 }
 
