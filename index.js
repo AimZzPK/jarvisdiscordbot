@@ -1687,7 +1687,7 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.update({ content: `❌ **Tic Tac Toe** — Your turn!\n\n${renderBoard(game.board)}`, components: [row, row2] });
   }
 
- // ── /vision ────────────────────────────────────────────────────
+// ── /vision ────────────────────────────────────────────────────
 if (interaction.commandName === 'vision') {
   await interaction.deferReply();
   const image = interaction.options.getAttachment('image');
@@ -1696,7 +1696,7 @@ if (interaction.commandName === 'vision') {
   try {
     const res = await groq.chat.completions.create({
       model: "qwen/qwen3.6-27b",
-      max_tokens: 600,
+      max_tokens: 2048,
       reasoning_format: "hidden",
       messages: [
         {
@@ -1708,10 +1708,15 @@ if (interaction.commandName === 'vision') {
         }
       ]
     });
-    let text = res.choices[0].message.content
+    const choice = res.choices[0];
+    let text = (choice.message.content || '')
       .replace(/<think>[\s\S]*?<\/think>/gi, '')
       .trim();
-    if (!text) text = "❌ Got an empty response, try again.";
+    if (!text) {
+      text = choice.finish_reason === 'length'
+        ? "❌ The model ran out of room thinking about this one — try a shorter/simpler question, or I'll bump the token limit further."
+        : "❌ Got an empty response, try again.";
+    }
     const chunks = splitMessage(text);
     await interaction.editReply(chunks[0]);
     for (const chunk of chunks.slice(1)) await interaction.followUp(chunk);
