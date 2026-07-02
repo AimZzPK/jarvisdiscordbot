@@ -52,9 +52,6 @@ const { execSync } = require('child_process');
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 const FormData = require('form-data');
 
-// NEW: engagement pack (leveling, economy, birthdays, rep, starboard)
-const jarvisEngagement = require('./jarvis-engagement');
-
 // =========================
 // RATE LIMITING
 // =========================
@@ -1220,8 +1217,6 @@ const commands = [
       .addBooleanOption(o => o.setName('enabled').setDescription('Turn autoroles on or off').setRequired(true)))
     .setDMPermission(false),
 ].map(c => c.toJSON())
- // NEW: merge in the engagement pack's slash commands (leveling, economy, birthdays, rep, starboard)
- .concat(jarvisEngagement.commands.map(c => c.data.toJSON()));
 
 // =========================
 // DEPLOY COMMANDS
@@ -1241,7 +1236,6 @@ client.once('clientReady', async () => {
   await loadDashboardConfig();
 
   initRoleSystems(client, redis, () => dashboardConfig);
-jarvisEngagement.initLevelRoles(() => dashboardConfig, saveDashboardConfig); // NEW
 
   client.user.setPresence({
     activities: [{ name: "Join discord.gg/5NtU3eFBrM" }],
@@ -1254,8 +1248,6 @@ jarvisEngagement.initLevelRoles(() => dashboardConfig, saveDashboardConfig); // 
 
   initSocialNotifications(client, redis, () => dashboardConfig, EmbedBuilder);
 
-  // NEW: start the birthday scheduler from the engagement pack
-  jarvisEngagement.startBirthdayScheduler(client);
 
   const voiceDeps = {
     groq,
@@ -1636,22 +1628,6 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (!interaction.isChatInputCommand()) return;
-
-  // ── NEW: engagement pack commands (leveling, economy, birthdays, rep, starboard) ──
-  const engagementCmd = jarvisEngagement.commands.find(c => c.data.name === interaction.commandName);
-  if (engagementCmd) {
-    try {
-      await engagementCmd.execute(interaction);
-    } catch (err) {
-      console.error('[Engagement]', err);
-      if (interaction.deferred || interaction.replied) {
-        await interaction.editReply({ content: '❌ Something went wrong.' }).catch(() => {});
-      } else {
-        await interaction.reply({ content: '❌ Something went wrong.', flags: 64 }).catch(() => {});
-      }
-    }
-    return;
-  }
 
   // ── /giveaway ──────────────────────────────────────────────────
   if (interaction.commandName === 'giveaway') {
@@ -2699,7 +2675,6 @@ client.on('interactionCreate', async (interaction) => {
 client.on('messageReactionAdd', async (reaction, user) => {
   await handleReactionAdd(reaction, user);
   // NEW: starboard reaction handling
-  await jarvisEngagement.handleStarboardReaction(reaction, user);
 });
 
 client.on('messageReactionRemove', async (reaction, user) => {
@@ -2712,8 +2687,6 @@ client.on('messageReactionRemove', async (reaction, user) => {
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   await handleAutomod(message);
-  // NEW: leveling/XP tracking
-  await jarvisEngagement.handleLevelingMessage(message);
   const content = message.content;
   const lower = content.toLowerCase();
   const isDM = message.guild === null;
